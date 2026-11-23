@@ -41,6 +41,7 @@ internal data class TvApp(
 )
 
 class MainActivity : ComponentActivity() {
+    internal val media by lazy { MediaStore(applicationContext) }
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
     private val gallery by lazy { PhotoGallery(applicationContext) }
     private val rotationEngine by lazy { PhotoRotation(ZonedDateTime::now, gallery::next) }
@@ -188,6 +189,15 @@ class MainActivity : ComponentActivity() {
 
     internal fun tvSettings() {
         if (!send(Intent(Settings.ACTION_SETTINGS))) showNotice("TV settings couldn't be opened.")
+    }
+
+    internal fun searchYouTube(query: String) {
+        val url = Uri.parse("https://www.youtube.com/results").buildUpon()
+            .appendQueryParameter("search_query", query).build()
+        val browser = Intent(Intent.ACTION_VIEW, url)
+        if (send(Intent(browser).setPackage("com.google.android.youtube.tv")) || send(browser)) return
+        val installed = apps.firstOrNull { it.pkg == "com.google.android.youtube.tv" }
+        if (installed != null) open(installed) else showNotice("YouTube couldn't be opened.")
     }
 
     internal fun openPhotoSource() {

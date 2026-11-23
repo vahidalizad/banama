@@ -2,6 +2,10 @@
 
 A standalone Android TV launcher for the TCL C89L. Open **Scenic Home** from the TV's **Apps** screen. **All apps** scrolls down to the app grid. Hold **OK** on an app for its options. Select **Next wallpaper** to advance, or hold **OK** on it for rotation and credits. The gear opens the TV settings panel.
 
+Press **Down** from favorites to reach the 30nama Watchlist. Use **Search** for the catalog, Watchlist, likes, or YouTube. Hold **OK** on the gear to manage the 30nama connection. Pair from a phone using the launcher's QR code.
+
+Scenic Home requests the pairing link directly from 30nama and renders a QR code on the TV. For native access, set `thirtyNama.clientKey` and, if supplied by 30nama, `thirtyNama.api` in the ignored `local.properties` file before building. Use a client identifier intended for distribution in an APK. See [30nama API research](docs/30nama-api.md) for the integration and playback checks.
+
 ## Build and test
 
 From this directory, create the Docker builder and image once.

@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application") version "8.9.2"
     id("org.jetbrains.kotlin.android") version "2.1.20"
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.20"
 }
+
+val local = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+}
+
+fun localString(name: String, fallback: String = ""): String =
+    "\"" + local.getProperty(name, fallback).trim().replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\r", "\\r").replace("\n", "\\n") + "\""
 
 android {
     namespace = "tv.scenichome.launcher"
@@ -13,8 +23,10 @@ android {
         applicationId = "tv.scenichome.launcher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.0.7"
+        versionCode = 9
+        versionName = "1.1.0"
+        buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
+        buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))
     }
 
     compileOptions {
@@ -22,7 +34,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 }
 
 kotlin { jvmToolchain(17) }
@@ -32,5 +47,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.tv:tv-material:1.0.0")
+    implementation("androidx.media3:media3-exoplayer:1.6.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.6.1")
+    implementation("androidx.media3:media3-ui:1.6.1")
+    implementation("com.google.zxing:core:3.5.3")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250107")
 }
