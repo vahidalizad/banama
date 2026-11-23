@@ -1,6 +1,6 @@
 # Scenic Home
 
-A standalone Android TV launcher for the TCL C89L. Open **Scenic Home** from the TV's **Apps** screen. Hold **OK** on an app for its options. Photo rotation, credits, and TV settings are under **Settings**.
+A standalone Android TV launcher for the TCL C89L. Open **Scenic Home** from the TV's **Apps** screen. **All apps** scrolls down to the app grid. Hold **OK** on an app for its options. Select **Next wallpaper** to advance, or hold **OK** on it for rotation and credits. The gear opens the TV settings panel.
 
 ## Build and test
 
@@ -43,6 +43,6 @@ After testing, switch Wireless debugging off on the TV. Keep the Docker volume t
 
 ## Update
 
-During a dependency review, check AndroidX and the pinned SDK toolchain for relevant changes. Rebuild and run the tests in Docker, then install over the previous APK using the same signing volume. Check remote focus, Google Play, photo credits, and **Next photo** on the TCL.
+During a dependency review, check AndroidX and the pinned SDK toolchain for relevant changes. Rebuild and run the tests in Docker, then install over the previous APK using the same signing volume. Check remote focus, Google Play, photo credits, and **Next wallpaper** on the TCL.
 
 Scenic Home rotates featured [Wikimedia Commons photographs](https://commons.wikimedia.org/wiki/Category:Featured_pictures_of_landscapes). The offline photo and banner crop use [Murlough Bay](https://commons.wikimedia.org/wiki/File:Murlough_bay_(48770060832).jpg) by Salvatore Gerace, licensed CC0.

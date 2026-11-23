@@ -8,14 +8,18 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,15 +28,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -41,15 +45,18 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -64,16 +71,20 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.tv.material3.Border
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.LocalTextStyle
@@ -82,9 +93,12 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 private val ink = Color(0xFF0C201E)
@@ -96,20 +110,33 @@ private val edge = Color(0xFF42615B)
 private val dockShape = RoundedCornerShape(24.dp)
 private val tileShape = RoundedCornerShape(12.dp)
 private val glassTile = RoundedCornerShape(16.dp)
+private const val SHELF_HEADING = "apps/heading"
+// Keep a visible app at its current position instead of pivoting it toward the top of the TV.
+private val shelfFocusScroll = object : BringIntoViewSpec {}
 
-private enum class Page { HOME, APPS, SETTINGS, MANAGE, CREDITS }
+private enum class PhotoDialog { OPTIONS, CREDITS }
 private data class FocusMove(val id: String, val revision: Int)
-private data class Setting(val key: String, val title: String, val enabled: Boolean = true, val run: () -> Unit)
-private val appKey: (TvApp) -> String = { "app/${it.pkg}" }
+private data class Setting(
+    val key: String,
+    val title: String,
+    val enabled: Boolean = true,
+    val keepOpen: Boolean = false,
+    val run: () -> Unit,
+)
+
+private fun dockKey(app: TvApp) = "home/app/${app.pkg}"
+private fun shelfKey(app: TvApp) = "apps/app/${app.pkg}"
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun ScenicHome(activity: MainActivity) {
-    var page by rememberSaveable { mutableStateOf(Page.HOME) }
-    var menu by remember { mutableStateOf<TvApp?>(null) }
-    var lastHome by rememberSaveable { mutableStateOf<String?>(null) }
-    val remembered = remember { mutableMapOf<Page, String>() }
     val grid = rememberLazyGridState()
-    val settingsList = rememberLazyListState()
+    var appsOpen by rememberSaveable { mutableStateOf(false) }
+    var scrollRequest by remember { mutableIntStateOf(0) }
+    var scrolling by remember { mutableStateOf(appsOpen) }
+    var appMenu by remember { mutableStateOf<TvApp?>(null) }
+    var photoDialog by remember { mutableStateOf<PhotoDialog?>(null) }
+    var lastFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
 
@@ -118,57 +145,35 @@ internal fun ScenicHome(activity: MainActivity) {
         val byId = apps.associateBy { it.pkg }
         dockApps(apps.map { it.pkg }, activity.pinned, activity.recent).mapNotNull(byId::get)
     }
-    val settings = listOf(
-        Setting("gallery/next", if (activity.photoBusy) "Loading photo…" else "Next photo", !activity.photoBusy) {
-            activity.nextPhoto()
-        },
-        Setting("gallery/pause", if (activity.paused) "Resume rotation" else "Pause rotation") {
-            activity.togglePause()
-        },
-        Setting("gallery/credits", "Photo credits") { page = Page.CREDITS },
-        Setting("system/manage", "Manage apps") { page = Page.MANAGE },
-        Setting("system/play", "Get apps", run = activity::getApps),
-        Setting("system/settings", "TV settings", run = activity::tvSettings),
-    )
-    val targets = when (page) {
-        Page.HOME -> dock.map(appKey) + listOf("home/apps", "home/play", "home/settings")
-        Page.APPS -> apps.map(appKey).ifEmpty { listOf("apps/play") }
-        Page.MANAGE -> apps.map(appKey).ifEmpty { listOf("apps/play") }
-        Page.SETTINGS -> settings.map { it.key }
-        Page.CREDITS -> listOf("credits/source")
-    }
+    val scene = activity.scene
+    val blur = remember(scene) { scene?.frosted?.asImageBitmap() }
+    val showApps = appsOpen || grid.canScrollBackward
+    val dialogOpen = appMenu != null || photoDialog != null
+    val shelfIds = if (showApps) apps.map(::shelfKey) else emptyList()
+    val targets = dock.map(::dockKey) +
+        listOf("home/apps", "home/next", "home/play", "home/settings") + shelfIds
 
-    LaunchedEffect(page, activity.foreground, activity.appsLoaded, menu != null, targets) {
-        if (!activity.foreground || menu != null) return@LaunchedEffect
-        if (page == Page.HOME && !activity.appsLoaded) return@LaunchedEffect
-        val old = if (page == Page.HOME) lastHome else remembered[page]
-        val target = focusAfterRefresh(old, targets) ?: return@LaunchedEffect
-        val index = targets.indexOf(target)
-        if (page == Page.APPS || page == Page.MANAGE) {
-            if (apps.isNotEmpty() && grid.layoutInfo.visibleItemsInfo.none { it.index == index }) {
-                grid.scrollToItem(index)
+    LaunchedEffect(activity.foreground, activity.appsLoaded, scrolling, dialogOpen, targets) {
+        if (!activity.foreground || !activity.appsLoaded || scrolling || dialogOpen) return@LaunchedEffect
+        val target = focusAfterRefresh(lastFocus, targets) ?: return@LaunchedEffect
+        val shelfIndex = shelfIds.indexOf(target)
+        if (shelfIndex >= 0) {
+            val itemIndex = shelfIndex + 2 // The favorites and heading occupy the first two items.
+            if (grid.layoutInfo.visibleItemsInfo.none { it.index == itemIndex }) {
+                grid.scrollToItem(itemIndex)
             }
-        }
-        if (page == Page.SETTINGS && settingsList.layoutInfo.visibleItemsInfo.none { it.index == index }) {
-            settingsList.scrollToItem(index)
+        } else if (target.startsWith("home/app") && grid.firstVisibleItemIndex > 0) {
+            grid.scrollToItem(0)
         }
         move = FocusMove(target, ++sequence)
     }
 
     val onFocused: (String) -> Unit = { id ->
-        if (menu == null) {
-            if (page == Page.HOME) {
-                if (activity.appsLoaded) lastHome = id
-            } else {
-                remembered[page] = id
-            }
-        }
+        if (!dialogOpen && !scrolling && activity.appsLoaded) lastFocus = id
     }
-    BackHandler(page != Page.HOME && menu == null) {
-        page = when (page) {
-            Page.CREDITS, Page.MANAGE -> Page.SETTINGS
-            else -> Page.HOME
-        }
+    BackHandler((appsOpen || grid.canScrollBackward) && !dialogOpen) {
+        scrolling = true
+        appsOpen = false
     }
     LaunchedEffect(activity.notice) {
         if (activity.notice != null) {
@@ -187,73 +192,92 @@ internal fun ScenicHome(activity: MainActivity) {
             val margin = (maxWidth * .055f).coerceIn(28.dp, 72.dp)
             val compact = maxHeight < 480.dp
             val vertical = if (compact) 24.dp else 34.dp
+            val headerSpace = vertical + 76.dp
+            val viewport = (maxHeight - headerSpace).coerceAtLeast(120.dp)
+            val reveal = with(LocalDensity.current) { (viewport * .52f).roundToPx() }
+            val columns = if (maxWidth >= 940.dp) 6 else 5
 
-            SceneBackdrop(activity.scene)
-            when (page) {
-                Page.HOME -> Home(
-                    activity, dock, margin, vertical, compact, move, onFocused,
-                    onApps = { page = Page.APPS },
-                    onSettings = { page = Page.SETTINGS },
-                    onMenu = { menu = it },
+            LaunchedEffect(appsOpen, scrollRequest, reveal) {
+                try {
+                    if (appsOpen) {
+                        snapshotFlow { grid.layoutInfo.totalItemsCount }.first { it > 1 }
+                        grid.animateScrollToItem(0, reveal)
+                        lastFocus = apps.firstOrNull()?.let(::shelfKey) ?: "home/play"
+                    } else if (grid.canScrollBackward || scrolling) {
+                        grid.animateScrollToItem(0)
+                        lastFocus = "home/apps"
+                    }
+                } finally {
+                    scrolling = false
+                }
+            }
+
+            SceneBackdrop(scene)
+            if (showApps) {
+                AppShelfBackdrop(
+                    grid,
+                    Modifier.fillMaxSize().padding(top = headerSpace, start = margin - 12.dp, end = margin - 12.dp),
                 )
-                Page.APPS, Page.MANAGE -> {
-                    val managing = page == Page.MANAGE
-                    Sheet(
-                        if (managing) "Manage apps" else "All apps",
-                        if (managing) "Choose an app for options" else "Hold OK for app options",
-                        margin, vertical,
-                    ) {
-                        if (apps.isEmpty()) {
-                            Text(
-                                if (activity.appsLoaded) "Apps you install will appear here." else "Finding TV apps…",
-                                color = secondary, fontSize = 16.sp,
+            }
+            CompositionLocalProvider(LocalBringIntoViewSpec provides shelfFocusScroll) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    state = grid,
+                    modifier = Modifier.fillMaxSize().padding(top = headerSpace),
+                    contentPadding = PaddingValues(start = margin, end = margin, bottom = if (showApps) vertical else 0.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    userScrollEnabled = showApps,
+                ) {
+                    item(key = "home/dock", span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().height(viewport).padding(bottom = vertical)) {
+                            FavoritesRow(
+                                activity, dock, blur, compact, move, onFocused,
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                                onApps = {
+                                    scrolling = true
+                                    appsOpen = true
+                                    scrollRequest++
+                                },
+                                onMenu = { appMenu = it },
                             )
-                            Action("Get apps", activity::getApps, "apps/play", move, onFocused)
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(if (maxWidth >= 940.dp) 6 else 5),
-                                state = grid,
-                                modifier = Modifier.fillMaxHeight(),
-                                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                            ) {
-                                items(apps, key = { it.pkg }) { app ->
-                                    AppTile(
-                                        activity, app, move, onFocused,
-                                        if (compact) 86.dp else 100.dp,
-                                        onClick = if (managing) ({ menu = app }) else ({ activity.open(app) }),
-                                        onLong = { menu = app },
-                                    )
-                                }
+                        }
+                    }
+                    if (showApps) {
+                        item(key = SHELF_HEADING, span = { GridItemSpan(maxLineSpan) }) {
+                            Text(
+                                "All apps", fontSize = 26.sp, fontWeight = FontWeight.SemiBold, color = foreground,
+                                modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+                            )
+                        }
+                        items(apps, key = ::shelfKey) { app ->
+                            AppTile(
+                                activity, app, shelfKey(app), move, onFocused, if (compact) 86.dp else 96.dp,
+                                onClick = { activity.open(app) }, onLong = { appMenu = app }, flat = true,
+                            )
+                        }
+                        if (apps.isEmpty()) {
+                            item(key = "apps/empty", span = { GridItemSpan(maxLineSpan) }) {
+                                Text(
+                                    if (activity.appsLoaded) "Apps you install will appear here." else "Finding TV apps…",
+                                    color = secondary, fontSize = 16.sp, modifier = Modifier.padding(horizontal = 6.dp),
+                                )
                             }
                         }
                     }
                 }
-                Page.SETTINGS -> Sheet("Settings", null, margin, vertical) {
-                    LazyColumn(
-                        state = settingsList,
-                        modifier = Modifier.widthIn(max = 540.dp).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(settings, key = { it.key }) { item ->
-                            Action(item.title, item.run, item.key, move, onFocused, Modifier.fillMaxWidth(), item.enabled)
-                        }
-                    }
-                }
-                Page.CREDITS -> {
-                    val scene = activity.scene?.scene ?: Scene.fallback
-                    Sheet("Photo credits", null, margin, vertical) {
-                        Column(
-                            Modifier.widthIn(max = 600.dp).fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Text(scene.title, fontSize = 25.sp, fontWeight = FontWeight.Medium, color = foreground)
-                            Text("Photograph by ${scene.artist}", fontSize = 17.sp, color = secondary)
-                            Text("Wikimedia Commons · ${scene.license}", fontSize = 16.sp, color = secondary)
-                            Action("Open photo source", activity::openPhotoSource, "credits/source", move, onFocused)
-                        }
-                    }
-                }
+            }
+            Clock(blur, Modifier.align(Alignment.TopStart).padding(start = margin, top = vertical).zIndex(1f))
+            Row(
+                Modifier.align(Alignment.TopEnd).padding(end = margin, top = vertical).zIndex(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                HomeAction(
+                    "home/next", "Next wallpaper", R.drawable.home_next, move, onFocused, blur,
+                    onClick = activity::nextPhoto, onLongClick = { photoDialog = PhotoDialog.OPTIONS },
+                )
+                HomeAction("home/play", "Get apps", R.drawable.home_play, move, onFocused, blur, activity::getApps)
+                HomeAction("home/settings", "TV settings", R.drawable.home_settings, move, onFocused, blur, activity::tvSettings)
             }
             activity.notice?.let { message ->
                 Box(
@@ -266,8 +290,43 @@ internal fun ScenicHome(activity: MainActivity) {
             }
         }
 
-        menu?.let { app ->
-            AppMenu(activity, app) { menu = null }
+        appMenu?.let { app -> AppMenu(activity, app) { appMenu = null } }
+        when (photoDialog) {
+            PhotoDialog.OPTIONS -> OptionsDialog(
+                "Wallpaper", null, listOf(
+                    Setting("pause", if (activity.paused) "Resume rotation" else "Pause rotation", keepOpen = true) {
+                        activity.togglePause()
+                    },
+                    Setting("credits", "Photo credits") { photoDialog = PhotoDialog.CREDITS },
+                ),
+            ) { photoDialog = null }
+            PhotoDialog.CREDITS -> {
+                val credit = scene?.scene ?: Scene.fallback
+                OptionsDialog(
+                    "Photo credits",
+                    "${credit.title}\nPhotograph by ${credit.artist}\nWikimedia Commons · ${credit.license}",
+                    listOf(Setting("source", "Open photo source", run = activity::openPhotoSource)),
+                ) { photoDialog = null }
+            }
+            null -> Unit
+        }
+    }
+}
+
+@Composable
+private fun AppShelfBackdrop(grid: LazyGridState, modifier: Modifier) {
+    Canvas(modifier.clipToBounds()) {
+        val heading = grid.layoutInfo.visibleItemsInfo.firstOrNull { it.key == SHELF_HEADING }
+        val radius = 20.dp.toPx()
+        val top = heading?.let { it.offset.y.toFloat() - 8.dp.toPx() }
+            ?: if (grid.firstVisibleItemIndex >= 2) -radius else return@Canvas
+        if (top < size.height) {
+            drawRoundRect(
+                color = Color(0xEC15191E),
+                topLeft = Offset(0f, top),
+                size = Size(size.width, size.height - top + radius),
+                cornerRadius = CornerRadius(radius),
+            )
         }
     }
 }
@@ -295,58 +354,43 @@ private fun SceneBackdrop(scene: LoadedScene?) {
 }
 
 @Composable
-private fun Home(
+private fun FavoritesRow(
     activity: MainActivity,
     dock: List<TvApp>,
-    margin: Dp,
-    vertical: Dp,
+    blur: ImageBitmap?,
     compact: Boolean,
     move: FocusMove?,
     onFocused: (String) -> Unit,
+    modifier: Modifier,
     onApps: () -> Unit,
-    onSettings: () -> Unit,
     onMenu: (TvApp) -> Unit,
 ) {
-    val tileHeight = if (compact) 88.dp else 106.dp
-    val scene = activity.scene
-    val blur = remember(scene) { scene?.frosted?.asImageBitmap() }
-    Box(Modifier.fillMaxSize().padding(horizontal = margin, vertical = vertical)) {
-        Clock(blur, Modifier.align(Alignment.TopStart))
-        Row(
-            Modifier.align(Alignment.BottomCenter).widthIn(max = 820.dp).fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
-        ) {
-            dock.forEach { app ->
-                androidx.compose.runtime.key(app.pkg) {
-                    AppTile(
-                        activity, app, move, onFocused, tileHeight,
-                        onClick = { activity.open(app) },
-                        onLong = { onMenu(app) },
-                        modifier = Modifier.weight(1f),
-                        glass = true,
-                        blur = blur,
-                    )
-                }
-            }
-            repeat(MAX_FAVORITES - dock.size) { Spacer(Modifier.weight(1f)) }
-            FocusSurface(
-                "home/apps", move, onFocused, onApps, Modifier.weight(1f).height(tileHeight),
-                glassShape = glassTile,
-                blur = blur,
-            ) {
-                TileCaption("All apps") {
-                    Box(Modifier.size(if (compact) 38.dp else 46.dp), contentAlignment = Alignment.Center) {
-                        Image(painterResource(R.drawable.home_apps), null, Modifier.size(if (compact) 30.dp else 35.dp))
-                    }
-                }
+    val height = if (compact) 88.dp else 106.dp
+    Row(
+        modifier.widthIn(max = 820.dp).fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
+    ) {
+        dock.forEach { app ->
+            androidx.compose.runtime.key(app.pkg) {
+                AppTile(
+                    activity, app, dockKey(app), move, onFocused, height,
+                    onClick = { activity.open(app) },
+                    onLong = { onMenu(app) },
+                    modifier = Modifier.weight(1f),
+                    blur = blur,
+                )
             }
         }
-        Row(
-            Modifier.align(Alignment.TopEnd),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        repeat(MAX_FAVORITES - dock.size) { Spacer(Modifier.weight(1f)) }
+        FocusSurface(
+            "home/apps", move, onFocused, onApps, Modifier.weight(1f).height(height),
+            glassShape = glassTile, blur = blur,
         ) {
-            HomeAction("home/play", "Get apps", R.drawable.home_play, move, onFocused, blur, activity::getApps)
-            HomeAction("home/settings", "Settings", R.drawable.home_settings, move, onFocused, blur, onSettings)
+            TileCaption("All apps") {
+                Box(Modifier.size(if (compact) 38.dp else 46.dp), contentAlignment = Alignment.Center) {
+                    Image(painterResource(R.drawable.home_apps), null, Modifier.size(if (compact) 30.dp else 35.dp))
+                }
+            }
         }
     }
 }
@@ -360,8 +404,12 @@ private fun HomeAction(
     onFocused: (String) -> Unit,
     blur: ImageBitmap?,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
-    FocusSurface(id, move, onFocused, onClick, Modifier.size(48.dp), glassShape = tileShape, blur = blur) {
+    FocusSurface(
+        id, move, onFocused, onClick, Modifier.size(48.dp),
+        onLongClick = onLongClick, glassShape = tileShape, blur = blur,
+    ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Image(painterResource(icon), label, Modifier.size(24.dp))
         }
@@ -371,7 +419,6 @@ private fun HomeAction(
 @Composable
 private fun Clock(photo: ImageBitmap?, modifier: Modifier = Modifier) {
     var now by remember { mutableStateOf(ZonedDateTime.now()) }
-    var area by remember { mutableStateOf<PhotoArea?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
             now = ZonedDateTime.now()
@@ -380,6 +427,24 @@ private fun Clock(photo: ImageBitmap?, modifier: Modifier = Modifier) {
     }
     val timeFormat = remember { DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT) }
     val dateFormat = remember { DateTimeFormatter.ofPattern("EEEE, d MMMM") }
+    PhotoText(photo, modifier) { color, style ->
+        Column {
+            Text(
+                now.format(timeFormat), color = color, fontSize = 36.sp, lineHeight = 40.sp,
+                fontWeight = FontWeight.Medium, letterSpacing = (-.6).sp, style = style,
+            )
+            Text(now.format(dateFormat), color = color, fontSize = 15.sp, style = style)
+        }
+    }
+}
+
+@Composable
+private fun PhotoText(
+    photo: ImageBitmap?,
+    modifier: Modifier,
+    content: @Composable (Color, TextStyle) -> Unit,
+) {
+    var area by remember { mutableStateOf<PhotoArea?>(null) }
     val luminance = remember(photo, area) { area?.let { photo?.let(it::luminance) } ?: (0f..0f) }
     val darkText = Color(0xFF10171E)
     val darkContrast = (luminance.start + .05f) / (darkText.luminance() + .05f)
@@ -387,62 +452,37 @@ private fun Clock(photo: ImageBitmap?, modifier: Modifier = Modifier) {
     val dark = darkContrast > lightContrast
     val color = if (dark) darkText else foreground
     val shadow = if (dark) Color(0x64FFFFFF) else Color(0xAA050B11)
-    val legibleOnPhoto = LocalTextStyle.current.copy(shadow = Shadow(shadow, Offset(0f, 2f), 8f))
-    Column(modifier.onGloballyPositioned { area = it.photoArea() }) {
-        Text(
-            now.format(timeFormat), color = color, fontSize = 36.sp, lineHeight = 40.sp,
-            fontWeight = FontWeight.Medium, letterSpacing = (-.6).sp, style = legibleOnPhoto,
-        )
-        Text(now.format(dateFormat), color = color, fontSize = 15.sp, style = legibleOnPhoto)
-    }
-}
-
-@Composable
-private fun Sheet(
-    title: String,
-    detail: String?,
-    margin: Dp,
-    vertical: Dp,
-    content: @Composable () -> Unit,
-) {
-    Column(
-        Modifier.fillMaxSize().background(Color(0xEB0D211F))
-            .padding(horizontal = margin, vertical = vertical),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, fontSize = 38.sp, color = foreground, fontWeight = FontWeight.SemiBold, lineHeight = 44.sp)
-            detail?.let { Text(it, color = secondary, fontSize = 16.sp) }
-        }
-        content()
-    }
+    val style = LocalTextStyle.current.copy(shadow = Shadow(shadow, Offset(0f, 2f), 8f))
+    Box(modifier.onGloballyPositioned { area = it.photoArea() }) { content(color, style) }
 }
 
 @Composable
 private fun AppTile(
     activity: MainActivity,
     app: TvApp,
+    id: String,
     move: FocusMove?,
     onFocused: (String) -> Unit,
     height: Dp,
     onClick: () -> Unit,
     onLong: () -> Unit,
     modifier: Modifier = Modifier,
-    glass: Boolean = false,
     blur: ImageBitmap? = null,
+    flat: Boolean = false,
 ) {
     val icon by produceState<Bitmap?>(null, app.component) { value = activity.iconFor(app) }
     val bitmap = icon
     FocusSurface(
-        appKey(app), move, onFocused, onClick,
+        id, move, onFocused, onClick,
         modifier.fillMaxWidth().height(height), onLongClick = onLong,
-        glassShape = if (glass) glassTile else null,
+        glassShape = if (flat) null else glassTile,
         blur = blur,
+        fill = if (flat) Color(0xFF292F35) else null,
     ) {
         TileCaption(app.label) {
             if (bitmap != null) {
                 val size = Modifier.size(if (height < 90.dp) 38.dp else 46.dp)
-                Image(bitmap.asImageBitmap(), null, if (glass) size.clip(RoundedCornerShape(9.dp)) else size)
+                Image(bitmap.asImageBitmap(), null, size.clip(RoundedCornerShape(9.dp)))
             } else {
                 Image(painterResource(R.drawable.scenic_icon), null, Modifier.size(38.dp))
             }
@@ -490,10 +530,12 @@ private fun FocusSurface(
     onLongClick: (() -> Unit)? = null,
     glassShape: Shape? = null,
     blur: ImageBitmap? = null,
+    fill: Color? = null,
     content: @Composable () -> Unit,
 ) {
     val requester = remember { FocusRequester() }
     val shape = glassShape ?: tileShape
+    val focusedFill = if (fill != null) Color(0xFFE1E8EF) else mint
     LaunchedEffect(move, enabled) {
         if (move?.id == id && enabled) {
             withFrameNanos { }
@@ -509,11 +551,11 @@ private fun FocusSurface(
         },
         shape = ClickableSurfaceDefaults.shape(shape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (glassShape != null) Color.Transparent else Color(0xFF213D38),
+            containerColor = if (glassShape != null) Color.Transparent else fill ?: Color(0xFF213D38),
             contentColor = foreground,
-            focusedContainerColor = if (glassShape != null) Color.Transparent else mint,
+            focusedContainerColor = if (glassShape != null) Color.Transparent else focusedFill,
             focusedContentColor = if (glassShape != null) foreground else ink,
-            pressedContainerColor = if (glassShape != null) Color(0x35EAF6FF) else Color(0xFFABD8C7),
+            pressedContainerColor = if (glassShape != null) Color(0x35EAF6FF) else focusedFill,
             pressedContentColor = if (glassShape != null) foreground else ink,
             disabledContainerColor = panel, disabledContentColor = secondary,
         ),
@@ -541,16 +583,14 @@ private fun FrostedGlass(photo: ImageBitmap?, shape: Shape, modifier: Modifier) 
         Crossfade(photo, Modifier.matchParentSize(), animationSpec = tween(480), label = "frosted wallpaper") { image ->
             val frame = area
             if (image != null && frame != null) {
-                val crop = frame.wallpaperCrop(image)
+                val crop = frame.imageRegion(image)
                 val tint = remember(image, frame) { glassTint(frame.luminance(image).endInclusive) }
                 Canvas(Modifier.fillMaxSize()) {
                     drawImage(
                         image = image,
-                        dstOffset = IntOffset(
-                            (crop.left - frame.origin.x).roundToInt(),
-                            (crop.top - frame.origin.y).roundToInt(),
-                        ),
-                        dstSize = IntSize(crop.width.roundToInt(), crop.height.roundToInt()),
+                        srcOffset = IntOffset(crop.left, crop.top),
+                        srcSize = crop.size,
+                        dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
                         filterQuality = FilterQuality.Medium,
                     )
                     drawRect(Color.Black.copy(alpha = tint))
@@ -563,26 +603,28 @@ private fun FrostedGlass(photo: ImageBitmap?, shape: Shape, modifier: Modifier) 
 }
 
 private data class PhotoArea(val origin: Offset, val size: IntSize, val viewport: IntSize) {
-    fun wallpaperCrop(image: ImageBitmap): Rect {
+    fun imageRegion(image: ImageBitmap): IntRect {
         val scale = maxOf(viewport.width.toFloat() / image.width, viewport.height.toFloat() / image.height)
-        val width = (image.width * scale).roundToInt().toFloat()
-        val height = (image.height * scale).roundToInt().toFloat()
-        val left = (viewport.width - width) / 2f
-        val top = (viewport.height - height) / 2f
-        return Rect(left, top, left + width, top + height)
+        val left = (origin.x - (viewport.width - image.width * scale) / 2f) / scale
+        val top = (origin.y - (viewport.height - image.height * scale) / 2f) / scale
+        val x = floor(left).toInt().coerceIn(0, image.width - 1)
+        val y = floor(top).toInt().coerceIn(0, image.height - 1)
+        return IntRect(
+            x, y,
+            ceil(left + size.width / scale).toInt().coerceIn(x + 1, image.width),
+            ceil(top + size.height / scale).toInt().coerceIn(y + 1, image.height),
+        )
     }
 
     fun luminance(image: ImageBitmap): ClosedFloatingPointRange<Float> {
-        val crop = wallpaperCrop(image)
+        val crop = imageRegion(image)
         val bitmap = image.asAndroidBitmap()
         var lightest = 0f
         var darkest = 1f
         for (row in 0..4) {
-            val y = origin.y + size.height * row / 4f
-            val sourceY = ((y - crop.top) / crop.height * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
+            val sourceY = crop.top + (crop.height - 1) * row / 4
             for (column in 0..4) {
-                val x = origin.x + size.width * column / 4f
-                val sourceX = ((x - crop.left) / crop.width * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
+                val sourceX = crop.left + (crop.width - 1) * column / 4
                 val value = android.graphics.Color.luminance(bitmap.getPixel(sourceX, sourceY))
                 lightest = maxOf(lightest, value)
                 darkest = minOf(darkest, value)
@@ -604,17 +646,23 @@ private fun LayoutCoordinates.photoArea(): PhotoArea? {
 private fun AppMenu(activity: MainActivity, app: TvApp, close: () -> Unit) {
     val order = activity.pinned.filter { id -> activity.apps.any { it.pkg == id } }
     val position = order.indexOf(app.pkg)
-    val press = remember(app.pkg) { MenuSelectPress() }
-    var focusedAction by remember(app.pkg) { mutableStateOf<String?>(null) }
     val items = buildList {
         add(Setting("pin", if (position < 0) "Pin to favorites" else "Unpin from favorites") { activity.togglePin(app) })
         if (position >= 0 && order.size > 1) {
-            add(Setting("left", "Move left", position > 0) { activity.movePin(app, -1) })
-            add(Setting("right", "Move right", position < order.lastIndex) { activity.movePin(app, 1) })
+            add(Setting("left", "Move left", position > 0, keepOpen = true) { activity.movePin(app, -1) })
+            add(Setting("right", "Move right", position < order.lastIndex, keepOpen = true) { activity.movePin(app, 1) })
         }
         add(Setting("info", "App info") { activity.appInfo(app) })
         if (app.removable) add(Setting("uninstall", "Uninstall") { activity.uninstall(app) })
     }
+    val detail = if (position >= 0) "Favorite ${position + 1} of ${order.size}" else null
+    OptionsDialog(app.label, detail, items, close)
+}
+
+@Composable
+private fun OptionsDialog(title: String, detail: String?, items: List<Setting>, close: () -> Unit) {
+    val press = remember { MenuSelectPress() }
+    var focusedAction by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.widthIn(max = 420.dp).fillMaxWidth(.7f)
@@ -633,18 +681,16 @@ private fun AppMenu(activity: MainActivity, app: TvApp, close: () -> Unit) {
                 },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(app.label, color = foreground, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
-            if (position >= 0) {
-                Text("Favorite ${position + 1} of ${order.size}", color = secondary, fontSize = 15.sp)
-            }
+            Text(title, color = foreground, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+            detail?.let { Text(it, color = secondary, fontSize = 15.sp) }
             items.forEach { item ->
                 androidx.compose.runtime.key(item.key) {
                     Action(item.title, {
                         if (item.enabled) {
-                            if (item.key != "left" && item.key != "right") close()
+                            if (!item.keepOpen) close()
                             item.run()
                         }
-                    }, item.key, FocusMove("pin", 0), { focusedAction = it }, Modifier.fillMaxWidth(), item.enabled)
+                    }, item.key, FocusMove(items.first().key, 0), { focusedAction = it }, Modifier.fillMaxWidth(), item.enabled)
                 }
             }
         }
