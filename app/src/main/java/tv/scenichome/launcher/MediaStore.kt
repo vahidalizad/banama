@@ -1,6 +1,7 @@
 package tv.scenichome.launcher
 
 import android.content.Context
+import android.os.SystemClock
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -113,6 +114,34 @@ internal enum class MediaLibrary(val key: String, val label: String, val group: 
     LIKED("liked", "Liked", "favorite"),
 }
 
+private const val HOME_REFRESH_MS = 5 * 60_000L
+
+internal class RefreshSchedule(
+    home: Boolean,
+    library: MediaLibrary?,
+    signedIn: Boolean,
+    private val nextCheck: Map<String, Long>,
+) {
+    private val keys = buildList {
+        if (signedIn) {
+            add("account")
+            if (home) addAll(MediaLibrary.entries.map(MediaLibrary::key))
+            else if (library != null) add(library.key)
+        }
+        if (home) add("home")
+    }
+
+    fun due(now: Long, force: Boolean = false) = keys.filter { force || (nextCheck[it] ?: 0L) <= now }
+
+    fun delayFrom(now: Long): Long = keys.minOfOrNull { ((nextCheck[it] ?: 0L) - now).coerceAtLeast(1L) }
+        ?: HOME_REFRESH_MS
+}
+
+private class UpcomingScan(val revision: Int) {
+    val positions = mutableMapOf<Int, WatchPosition?>()
+    val episodes = mutableMapOf<Int, List<UpcomingEpisode>>()
+}
+
 internal class MediaStore(context: Context) {
     private val api = NamaApi()
     private val session = NamaSession(context)
@@ -121,6 +150,11 @@ internal class MediaStore(context: Context) {
     private val progressLock = Mutex()
     private var token: String? = null
     private var initialized = false
+    private val nextCheck = mutableMapOf<String, Long>()
+    private var indexedRevision = 0
+    private var pendingScan: UpcomingScan? = null
+    private val titleStreams = RecentReads<Pair<Int, Boolean>, PlaybackCatalog>(1, 30_000)
+    private val titleDownloads = RecentReads<Pair<Int, Boolean>, List<DownloadVideo>>(1, 30_000)
 
     val artwork = MediaArtwork()
     val configured get() = api.configured
@@ -137,6 +171,7 @@ internal class MediaStore(context: Context) {
     var upcomingLoaded by mutableStateOf(false)
         private set
     private var connectionIssue by mutableStateOf(false)
+    private var watchFailed by mutableStateOf(false)
     private var loading by mutableStateOf(false)
     var homeLoaded by mutableStateOf(false)
         private set
@@ -150,7 +185,7 @@ internal class MediaStore(context: Context) {
     private var streamProgress by mutableStateOf<Map<Int, WatchPosition?>>(emptyMap())
     private var seriesEpisodes by mutableStateOf<Map<Int, List<UpcomingEpisode>>>(emptyMap())
 
-    suspend fun initialize() = sessionLock.withLock {
+    private suspend fun initialize() = sessionLock.withLock {
         if (initialized) return@withLock
         val (savedToken, progress) = withContext(Dispatchers.IO) { session.read() to session.progress() }
         token = savedToken
@@ -164,49 +199,92 @@ internal class MediaStore(context: Context) {
         optBoolean("user_allowed_to_stream"), optBoolean("user_allowed_to_download"), optInt("user_id"),
     )
 
-    suspend fun refresh() = refreshLock.withLock {
+    suspend fun refresh(home: Boolean, library: MediaLibrary? = null, force: Boolean = false): Long = refreshLock.withLock {
         initialize()
-        if (!configured) return@withLock
+        if (!configured) return@withLock HOME_REFRESH_MS
         val current = token
-        loading = true
-        try {
-            coroutineScope {
-                if (current != null) {
-                    val resume = async { tryNama { api.call("continue_watching", current).watchHistory() } }
-                    val user = async { tryNama { api.call("user", current).readAccount() } }
-                    val updatedHistory = resume.await().getOrNull()
-                    if (current == token && updatedHistory != null) {
-                        streamProgress = streamProgress - updatedHistory.keys.filter { updatedHistory[it] != history[it] }.toSet()
-                        history = updatedHistory
+        val schedule = RefreshSchedule(home, library, current != null, nextCheck)
+        val now = SystemClock.elapsedRealtime()
+        val due = schedule.due(now, force)
+        fun checked(key: String) {
+            if (current == token) nextCheck[key] = now + HOME_REFRESH_MS
+        }
+
+        if (due.isNotEmpty()) {
+            loading = true
+            try {
+                coroutineScope {
+                    if ("home" in due) launch {
+                        tryNama { api.read("home") { it.optJSONObject("suggested")?.titlePage()?.titles.orEmpty() } }
+                            .onSuccess { suggestions = it }
+                        homeLoaded = true
+                        checked("home")
                     }
-                    val currentAccount = user.await()
-                    if (current == token && (currentAccount.exceptionOrNull() as? NamaFailure)?.rejectedSession == true) {
-                        forget(current)
-                    }
-                    if (current == token) {
-                        currentAccount.getOrNull()?.let { account = it }
-                        val membership = async { tryNama { api.call("user_mylist", current).readLists() } }
-                        val watch = tryNama { refreshShelf(MediaLibrary.WATCHLIST, current) }
-                        val updatedLists = membership.await()
-                        if (current == token) {
-                            updatedLists.getOrNull()?.let { lists = it }
+                    if (current == null) return@coroutineScope
+                    val accountCheck = if ("account" in due) launch {
+                        refreshAccount(current)
+                        checked("account")
+                    } else null
+                    suspend fun checkShelf(shelf: MediaLibrary) {
+                        val result = tryNama { refreshShelf(shelf, current) }
+                        accountCheck?.join()
+                        if (current != token) return
+                        if (shelf == MediaLibrary.WATCHLIST) {
+                            watchFailed = result.isFailure
                             catalogRevision++
-                            connectionIssue = currentAccount.isFailure || watch.isFailure || updatedLists.isFailure
-                            listOf(MediaLibrary.NOTIFY, MediaLibrary.LIKED).forEach { library ->
-                                launch { tryNama { refreshShelf(library, current) } }
-                            }
+                        }
+                        checked(shelf.key)
+                    }
+                    if (MediaLibrary.WATCHLIST.key in due) {
+                        checkShelf(MediaLibrary.WATCHLIST)
+                    }
+                    for (shelf in MediaLibrary.entries) {
+                        if (current == token && shelf != MediaLibrary.WATCHLIST && shelf.key in due) {
+                            launch { checkShelf(shelf) }
                         }
                     }
                 }
-                val home = tryNama { api.call("home") }
-                home.getOrNull()?.let { result ->
-                    suggestions = result.optJSONObject("suggested")?.titlePage()?.titles.orEmpty()
-                }
-                homeLoaded = true
+            } finally {
+                loading = false
             }
-        } finally {
-            homeLoaded = true
-            loading = false
+        }
+        schedule.delayFrom(SystemClock.elapsedRealtime())
+    }
+
+    private suspend fun refreshAccount(current: String) = coroutineScope {
+        val resume = async { tryNama { api.read("continue_watching", current, decode = JSONObject::watchHistory) } }
+        val user = async { tryNama { api.call("user", current).readAccount() } }
+        val updatedHistory = resume.await().getOrNull()
+        if (current == token && updatedHistory != null) {
+            val changed = (history.keys + updatedHistory.keys).filter { history[it]?.position != updatedHistory[it]?.position }
+            if (changed.isNotEmpty()) {
+                streamProgress = streamProgress - changed.toSet()
+                titleStreams.clear()
+            }
+            history = updatedHistory
+        }
+        val currentAccount = user.await()
+        if (current != token) return@coroutineScope
+        if ((currentAccount.exceptionOrNull() as? NamaFailure)?.rejectedSession == true) {
+            forget(current)
+            return@coroutineScope
+        }
+        currentAccount.getOrNull()?.let {
+            if (account?.stream != it.stream || account?.download != it.download) clearPlaybackReads()
+            account = it
+        }
+        val membership = tryNama { api.read("user_mylist", current) { it.readLists() } }
+        if (current == token) {
+            membership.getOrNull()?.let { updated ->
+                for (library in MediaLibrary.entries) {
+                    if (knows(library.group) && updated[library.group] != lists[library.group]) {
+                        nextCheck.remove(library.key)
+                        libraryRevisions[library] = libraryRevision(library) + 1
+                    }
+                }
+                lists = updated
+            }
+            connectionIssue = currentAccount.isFailure || membership.isFailure
         }
     }
 
@@ -246,6 +324,12 @@ internal class MediaStore(context: Context) {
         account = null
         shelves = emptyMap()
         libraryRevisions.clear()
+        nextCheck.clear()
+        clearPlaybackReads()
+        indexedRevision = 0
+        pendingScan = null
+        catalogRevision = 0
+        watchFailed = false
         upcomingLoaded = false
         lists = emptyMap()
         history = emptyMap()
@@ -285,7 +369,7 @@ internal class MediaStore(context: Context) {
                 .text("action")
         }.getOrNull()
         val confirmed = response == "add" || response == "remove"
-        val updated = tryNama { api.call("user_mylist", current).readLists() }.getOrNull()
+        val updated = if (confirmed) null else tryNama { api.read("user_mylist", current) { it.readLists() } }.getOrNull()
         if (current != token) return@withLock false
         lists = updated ?: if (confirmed) {
             val previous = lists[group].orEmpty()
@@ -293,46 +377,63 @@ internal class MediaStore(context: Context) {
         } else lists
         val library = MediaLibrary.entries.first { it.group == group }
         if (confirmed || (updated != null && has(group, id) == adding)) {
-            tryNama { refreshShelf(library, current) }
+            val revision = libraryRevision(library)
+            val shelf = tryNama { refreshShelf(library, current) }
             if (current != token) return@withLock false
-            libraryRevisions[library] = libraryRevision(library) + 1
+            if (shelf.isFailure) nextCheck.remove(library.key)
+            if (revision == libraryRevision(library)) libraryRevisions[library] = revision + 1
             if (library == MediaLibrary.WATCHLIST) catalogRevision++
             true
         } else false
     }
 
-    private suspend fun refreshShelf(library: MediaLibrary, current: String) {
+    private suspend fun refreshShelf(library: MediaLibrary, current: String): TitlePage {
         val first = libraryPage(library, 1, current)
         if (current == token && first != shelves[library]) {
             shelves = shelves + (library to first)
             libraryRevisions[library] = libraryRevision(library) + 1
         }
+        return first
     }
 
-    suspend fun list(library: MediaLibrary, page: Int): TitlePage {
+    suspend fun list(library: MediaLibrary, page: Int, retry: Boolean): TitlePage {
         val current = token ?: return TitlePage(emptyList(), 1)
-        if (page == 1) shelves[library]?.let { return it }
-        return libraryPage(library, page, current)
+        if (page != 1) return libraryPage(library, page, current)
+        fun freshShelf() = shelves[library]?.takeIf {
+            !retry && SystemClock.elapsedRealtime() < (nextCheck[library.key] ?: 0L)
+        }
+        freshShelf()?.let { return it }
+        return refreshLock.withLock {
+            if (current != token) throw NamaFailure()
+            freshShelf() ?: refreshShelf(library, current).also {
+                if (current != token) throw NamaFailure()
+                nextCheck[library.key] = SystemClock.elapsedRealtime() + HOME_REFRESH_MS
+                if (library == MediaLibrary.WATCHLIST) {
+                    watchFailed = false
+                    catalogRevision++
+                }
+            }
+        }
     }
 
     fun libraryRevision(library: MediaLibrary) = libraryRevisions[library] ?: 0
 
     fun libraryRetry(library: MediaLibrary) = !loading &&
-        (library !in shelves || library == MediaLibrary.WATCHLIST && connectionIssue)
+        (library !in shelves || library == MediaLibrary.WATCHLIST && (connectionIssue || watchFailed))
 
     private suspend fun libraryPage(library: MediaLibrary, page: Int, current: String): TitlePage =
-        api.call("user_list", current, mapOf(
+        api.read("user_list", current, mapOf(
             "action" to "list", "group" to library.group, "page" to page.toString(),
             "orderby" to library.order, "order" to "DESC",
-        )).titlePage()
+        ), JSONObject::titlePage)
 
     suspend fun search(query: String, page: Int): TitlePage =
-        api.call("search", form = mapOf("query" to query, "streamonly" to "false", "page" to page.toString())).titlePage()
+        api.read("search", form = mapOf("query" to query, "streamonly" to "false", "page" to page.toString()), decode = JSONObject::titlePage)
 
     suspend fun browse(parameters: String, sort: SearchOrder, page: Int): TitlePage =
-        api.call("advanced_search", form = mapOf(
+        api.read("advanced_search", form = mapOf(
             "parameters" to parameters, "orderby" to sort.parameter, "order" to "DESC", "page" to page.toString(),
-        )).titlePage()
+        ), decode = JSONObject::titlePage)
 
     suspend fun filters(): Map<String, List<BrowseOption>> {
         val values = api.call("advanced_search_parameters")
@@ -348,7 +449,7 @@ internal class MediaStore(context: Context) {
     suspend fun detail(title: MediaTitle): MediaTitle = detail(title.id) ?: title
 
     private suspend fun detail(id: Int): MediaTitle? =
-        api.call("single", token, mapOf("post_id" to id.toString())).mediaTitle()
+        api.read("single", token, mapOf("post_id" to id.toString()), JSONObject::mediaTitle)
 
     private fun serverPosition(id: Int) = streamProgress[id] ?: history[id]?.position
 
@@ -374,7 +475,10 @@ internal class MediaStore(context: Context) {
 
     suspend fun refreshUpcoming() = coroutineScope {
         val current = token ?: return@coroutineScope
-        if (catalogRevision == 0) return@coroutineScope
+        val revision = catalogRevision
+        if (revision == indexedRevision || SystemClock.elapsedRealtime() >= (nextCheck[MediaLibrary.WATCHLIST.key] ?: 0L)) {
+            return@coroutineScope
+        }
         val watchTitles = watchlist.toMutableList()
         for (page in 2..(shelves[MediaLibrary.WATCHLIST]?.pages ?: 1)) {
             if (current != token) return@coroutineScope
@@ -382,13 +486,15 @@ internal class MediaStore(context: Context) {
             if (more.isEmpty()) break
             watchTitles.addAll(more)
         }
-        val candidates = (watchTitles + history.values.map(WatchedTitle::title).filter { has("watchlist", it.id) })
-            .distinctBy(MediaTitle::id).filter(MediaTitle::series)
-        val missing = localProgress.keys.filter { id -> has("watchlist", id) && candidates.none { it.id == id } }
-        val titles = candidates + missing.mapNotNull { tryNama { detail(it) }.getOrNull()?.takeIf(MediaTitle::series) }
-        val positions = mutableMapOf<Int, WatchPosition?>()
-        val episodes = mutableMapOf<Int, List<UpcomingEpisode>>()
-        for (batch in titles.chunked(4)) {
+        val known = (watchTitles + history.values.map(WatchedTitle::title).filter { has("watchlist", it.id) })
+            .distinctBy(MediaTitle::id)
+        val typedIds = known.filter { it.type != TitleType.UNKNOWN }.mapTo(mutableSetOf(), MediaTitle::id)
+        val missing = localProgress.keys.filter { has("watchlist", it) && it !in typedIds }
+        val titles = known.filter(MediaTitle::series) + missing.mapNotNull {
+            tryNama { detail(it) }.getOrNull()?.takeIf(MediaTitle::series)
+        }
+        val scan = pendingScan?.takeIf { it.revision == revision } ?: UpcomingScan(revision).also { pendingScan = it }
+        for (batch in titles.filterNot { it.id in scan.episodes }.chunked(4)) {
             batch.map { title -> async {
                 if (current != token) return@async
                 val data = tryNama { stream(title, current) }
@@ -398,14 +504,16 @@ internal class MediaStore(context: Context) {
                 } else emptyList()
                 if (data.isSuccess || downloads.isNotEmpty()) {
                     val index = streamed ?: PlaybackCatalog(emptyList(), 0, 0L)
-                    if (streamed != null) positions[title.id] = streamed.savedPosition
-                    episodes[title.id] = index.includeDownloads(downloads).seriesEpisodes(title)
+                    if (streamed != null) scan.positions[title.id] = streamed.savedPosition
+                    scan.episodes[title.id] = index.includeDownloads(downloads).seriesEpisodes(title)
                 }
             } }.forEach { it.await() }
         }
-        if (current == token) {
-            streamProgress = streamProgress + positions
-            seriesEpisodes = seriesEpisodes + episodes
+        if (current == token && revision == catalogRevision) {
+            indexedRevision = revision
+            pendingScan = null
+            streamProgress = streamProgress + scan.positions
+            seriesEpisodes = seriesEpisodes + scan.episodes
             upcomingLoaded = true
         }
     }
@@ -413,7 +521,7 @@ internal class MediaStore(context: Context) {
     suspend fun refreshTitlePosition(title: MediaTitle) {
         val current = token ?: return
         if (lastPlayed(title.id) != null || title.id in streamProgress) return
-        val result = stream(title, current) ?: return
+        val result = stream(title, current, reuse = true) ?: return
         if (token == current) streamProgress = streamProgress + (title.id to result.savedPosition)
     }
 
@@ -432,7 +540,8 @@ internal class MediaStore(context: Context) {
             val position = WatchPosition(episode.key, timeMs)
             val furthest = watchedThrough(titleId)?.let { maxOf(it, episode.key) } ?: episode.key
             localProgress = localProgress + (titleId to LocalProgress(position, furthest, serverPosition(titleId)))
-            session.saveProgress(localProgress)
+            val snapshot = localProgress
+            withContext(NonCancellable + Dispatchers.IO) { session.saveProgress(snapshot) }
             sessionToken
         }
         if (report && userId > 0 && episode.fileId > 0 && episode.progressToken.isNotBlank()) {
@@ -449,33 +558,45 @@ internal class MediaStore(context: Context) {
         }
     }
 
-    private suspend fun download(title: MediaTitle, current: String? = token): List<DownloadVideo> {
-        if (account?.download != true && !title.freeDownload) return emptyList()
-        return api.call("download", current, mapOf(
-            "post_id" to title.id.toString(), "free_download" to (account?.download != true && title.freeDownload).toString(),
-        )).downloads()
+    fun clearPlaybackReads() {
+        titleStreams.clear()
+        titleDownloads.clear()
     }
 
-    private suspend fun stream(title: MediaTitle, current: String? = token): PlaybackCatalog? {
-        if (account?.stream != true && !title.freeStream) return null
+    private suspend fun download(title: MediaTitle, current: String?, reuse: Boolean = false): List<DownloadVideo> {
+        val free = account?.download != true
+        if (free && !title.freeDownload) return emptyList()
+        suspend fun read() = api.read("download", current, mapOf(
+            "post_id" to title.id.toString(), "free_download" to free.toString(),
+        ), JSONObject::downloads)
+        return if (reuse) titleDownloads.get(title.id to free) { read() } else read()
+    }
+
+    private suspend fun stream(title: MediaTitle, current: String?, reuse: Boolean = false): PlaybackCatalog? {
+        val free = account?.stream != true
+        if (free && !title.freeStream) return null
         val form = buildMap {
             put("post_id", title.id.toString())
-            if (account?.stream != true && title.freeStream) put("free_stream", "true")
+            if (free) put("free_stream", "true")
         }
-        return api.call("stream", current, form).playbackCatalog()
+        suspend fun read() = api.read("stream", current, form, JSONObject::playbackCatalog)
+        return if (reuse) titleStreams.get(title.id to free) { read() } else read()
     }
 
     suspend fun playback(title: MediaTitle): PlaybackCatalog = coroutineScope {
         val current = token
-        val seriesDownloads = if (title.series) async { tryNama { download(title, current) }.getOrNull().orEmpty() } else null
-        val streamed = tryNama { stream(title, current) }.getOrNull()
+        titleDownloads.clear()
+        val seriesDownloads = if (title.series) async { tryNama { download(title, current, reuse = true) }.getOrNull().orEmpty() } else null
+        val streamed = tryNama { stream(title, current, reuse = true) }.getOrNull()
+        titleStreams.clear()
         val catalog = streamed ?: PlaybackCatalog(emptyList(), 0, 0L)
         val combined = when {
             seriesDownloads != null -> catalog.includeDownloads(seriesDownloads.await())
-            catalog.episodes.isEmpty() -> catalog.includeDownloads(download(title, current))
+            catalog.episodes.isEmpty() -> catalog.includeDownloads(download(title, current, reuse = true))
             else -> catalog
         }
-        if (current != null && current == token) {
+        if (current != token) throw NamaFailure()
+        if (current != null) {
             if (streamed != null) streamProgress = streamProgress + (title.id to streamed.savedPosition)
             if (title.series && has("watchlist", title.id)) {
                 seriesEpisodes = seriesEpisodes + (title.id to combined.seriesEpisodes(title))
@@ -484,8 +605,13 @@ internal class MediaStore(context: Context) {
         combined
     }
 
+    suspend fun renewEpisode(title: MediaTitle, key: EpisodeNumber): MediaEpisode? {
+        val current = token
+        return stream(title, current)?.episodes?.firstOrNull { current == token && it.key == key }
+    }
+
     suspend fun alternatives(title: MediaTitle, episode: MediaEpisode): List<DownloadVideo> =
-        download(title).filter {
+        download(title, token, reuse = true).filter {
             !title.series || (it.season == episode.season && it.episode == episode.number)
         }
 }

@@ -17,6 +17,8 @@ import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
     internal val media by lazy { MediaStore(applicationContext) }
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
     private var updateApps: Job? = null
+    private var homeLaunches by mutableIntStateOf(0)
 
     internal var apps by mutableStateOf<List<TvApp>>(emptyList())
         private set
@@ -51,11 +54,22 @@ class MainActivity : ComponentActivity() {
     internal var notice by mutableStateOf<String?>(null)
         private set
 
+    internal var subtitlePreference: String?
+        get() = prefs.getString("subtitle_preference", null)
+        set(value) { prefs.edit().putString("subtitle_preference", value).apply() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pinned = readPackages("pinned")
         recent = readPackages("recent")
-        setContent { ScenicHome(this) }
+        setContent { key(homeLaunches) { ScenicHome(this) } }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
+            homeLaunches++
+        }
     }
 
     override fun onResume() {

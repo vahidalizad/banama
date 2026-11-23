@@ -16,12 +16,14 @@ import java.time.Year
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
+internal enum class TitleType { MOVIE, SERIES, UNKNOWN }
+
 internal data class MediaTitle(
     val id: Int,
     val name: String,
     val localized: String,
     val year: Int,
-    val series: Boolean,
+    val type: TitleType,
     val poster: String?,
     val cover: String?,
     val description: String,
@@ -36,7 +38,9 @@ internal data class MediaTitle(
     val ageRating: String,
     val countries: List<String>,
     val cast: List<CastMember>,
-)
+) {
+    val series get() = type == TitleType.SERIES
+}
 
 internal data class CastMember(val name: String, val role: String, val photo: String?)
 internal enum class RatingSource(val key: String, val label: String) {
@@ -178,41 +182,48 @@ internal class NamaApi(
     private val base = httpsUri(address.trimEnd('/'))?.takeIf { it.query == null && it.fragment == null }
     val configured = base != null && key.isNotBlank()
 
-    suspend fun call(action: String, session: String? = null, form: Map<String, String> = emptyMap()): JSONObject =
-        withContext(Dispatchers.IO) {
-            if (!configured) throw NamaFailure()
-            val connection = httpsUri("$base/action/$action")!!.toURL().openConnection() as HttpsURLConnection
-            connection.connectTimeout = 6_000
-            connection.readTimeout = if (action == "advanced_search" || action == "user_list") 25_000 else 9_000
-            connection.requestMethod = "POST"
-            connection.instanceFollowRedirects = false
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("c-api-key", key)
-            connection.setRequestProperty("c-version-number", BuildConfig.VERSION_NAME)
-            connection.setRequestProperty("c-language", if (Locale.getDefault().language == "fa") "fa" else "en")
-            session?.let { connection.setRequestProperty("c-token", it) }
-            try {
-                val encoded = form.entries.joinToString("&") { (name, value) ->
-                    "${URLEncoder.encode(name, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}"
-                }
-                connection.outputStream.use { it.write(encoded.toByteArray(Charsets.UTF_8)) }
-                val status = connection.responseCode
-                if (status == 401) throw NamaFailure(rejectedSession = true)
-                if (status !in 200..299) {
-                    throw NamaFailure(browserChallenge = connection.getHeaderField("cf-mitigated") == "challenge")
-                }
-                val result = connection.inputStream.use { JSONObject(it.readBounded(4 * 1024 * 1024).decodeToString()) }
-                val emptyList = action == "user_list" && form["action"] == "list" && result.isEmptyLibraryResponse()
-                if (action != "qrlogin_login" && !emptyList && (!result.optBoolean("success") || result.optBoolean("error"))) {
-                    throw NamaFailure(rejectedSession = result.optInt("status") == 401)
-                }
-                result.optJSONObject("result") ?: JSONObject()
-            } finally {
-                connection.disconnect()
+    suspend fun call(action: String, session: String? = null, form: Map<String, String> = emptyMap()) =
+        read(action, session, form) { it }
+
+    suspend fun <T> read(
+        action: String,
+        session: String? = null,
+        form: Map<String, String> = emptyMap(),
+        decode: (JSONObject) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        if (!configured) throw NamaFailure()
+        val connection = httpsUri("$base/action/$action")!!.toURL().openConnection() as HttpsURLConnection
+        connection.connectTimeout = 6_000
+        connection.readTimeout = if (action == "advanced_search" || action == "user_list") 25_000 else 9_000
+        connection.requestMethod = "POST"
+        connection.instanceFollowRedirects = false
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+        connection.setRequestProperty("Accept", "application/json")
+        connection.setRequestProperty("c-api-key", key)
+        connection.setRequestProperty("c-version-number", BuildConfig.VERSION_NAME)
+        connection.setRequestProperty("c-language", if (Locale.getDefault().language == "fa") "fa" else "en")
+        session?.let { connection.setRequestProperty("c-token", it) }
+        try {
+            val encoded = form.entries.joinToString("&") { (name, value) ->
+                "${URLEncoder.encode(name, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}"
             }
+            connection.outputStream.use { it.write(encoded.toByteArray(Charsets.UTF_8)) }
+            val status = connection.responseCode
+            if (status == 401) throw NamaFailure(rejectedSession = true)
+            if (status !in 200..299) {
+                throw NamaFailure(browserChallenge = connection.getHeaderField("cf-mitigated") == "challenge")
+            }
+            val result = connection.inputStream.use { JSONObject(it.readBounded(4 * 1024 * 1024).decodeToString()) }
+            val emptyList = action == "user_list" && form["action"] == "list" && result.isEmptyLibraryResponse()
+            if (action != "qrlogin_login" && !emptyList && (!result.optBoolean("success") || result.optBoolean("error"))) {
+                throw NamaFailure(rejectedSession = result.optInt("status") == 401)
+            }
+            decode(result.optJSONObject("result") ?: JSONObject())
+        } finally {
+            connection.disconnect()
         }
+    }
 }
 
 internal fun JSONObject.isEmptyLibraryResponse(): Boolean {
@@ -255,7 +266,11 @@ internal fun JSONObject.mediaTitle(): MediaTitle? {
     }
     return MediaTitle(
         id, name, title.text("local").takeUnless { it == name }.orEmpty(), info?.optInt("year") ?: 0,
-        options?.optBoolean("is_series") == true || options?.text("title_type") == "series",
+        when {
+            options?.optBoolean("is_series") == true || options?.text("title_type") == "series" -> TitleType.SERIES
+            options?.text("is_series").equals("false", ignoreCase = true) || options?.text("title_type") == "movie" -> TitleType.MOVIE
+            else -> TitleType.UNKNOWN
+        },
         poster("medium"), optJSONObject("image")?.art("cover"), plot?.text("english")?.ifBlank { plot.text("local") }.orEmpty(),
         info?.optJSONObject("time")?.optInt("default") ?: 0, info?.optInt("seasons") ?: 0,
         genres.map { it.text("name") }.filter(String::isNotBlank),
@@ -406,18 +421,22 @@ private fun <T> readMedia(address: URI, range: Long? = null, read: (HttpsURLConn
     return null
 }
 
+internal class ExpiredMediaLink : IOException()
+internal fun isExpiredMediaStatus(status: Int) = status == 401 || status == 403 || status == 410
+
 internal suspend fun seekableDownloadSize(address: String): Long? = withContext(Dispatchers.IO) {
     val uri = httpsUri(address) ?: return@withContext null
     runCatching {
         fun sizeAt(offset: Long): Long? =
             readMedia(uri, offset) { connection ->
+                if (isExpiredMediaStatus(connection.responseCode)) throw ExpiredMediaLink()
                 val total = rangeSize(connection.responseCode, connection.getHeaderField("Content-Range"), offset)
                 total?.takeIf { connection.inputStream.use { it.read() >= 0 && it.read() == -1 } }
             }
         val first = sizeAt(0) ?: return@runCatching null
         val seek = sizeAt(1_048_576L) ?: return@runCatching null
         maxOf(first, seek).takeIf { first == 0L || seek == 0L || first == seek }
-    }.getOrNull()
+    }.getOrElse { if (it is ExpiredMediaLink) throw it else null }
 }
 
 internal class MediaArtwork {

@@ -68,7 +68,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -129,7 +128,7 @@ internal fun ScenicHome(activity: MainActivity) {
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var pairing by rememberSaveable { mutableStateOf(false) }
     var title by remember { mutableStateOf<MediaTitle?>(null) }
-    var startEpisode by remember { mutableStateOf<EpisodeNumber?>(null) }
+    var heroEpisode by remember { mutableStateOf<EpisodeNumber?>(null) }
     var searchLibrary by rememberSaveable { mutableStateOf<MediaLibrary?>(null) }
     val catalogSearch = remember { MediaSearchState() }
     val savedSearch = remember(media.accountRevision) {
@@ -137,15 +136,16 @@ internal fun ScenicHome(activity: MainActivity) {
     }
     val search = savedSearch[searchLibrary] ?: catalogSearch
     val heading = title
-    val scope = rememberCoroutineScope()
+    val homeVisible = !pairing && heading == null && !searchOpen
+    val visibleLibrary = searchLibrary.takeIf { searchOpen && heading == null && !pairing }
 
-    LaunchedEffect(media.accountRevision, media.catalogRevision) { media.refreshUpcoming() }
-    LaunchedEffect(activity.foreground) {
-        if (!activity.foreground) return@LaunchedEffect
-        while (true) {
-            media.refresh()
-            delay(5 * 60_000)
+    LaunchedEffect(activity.foreground, media.accountRevision, homeVisible, visibleLibrary) {
+        if (activity.foreground) while (true) {
+            delay(media.refresh(homeVisible, visibleLibrary))
         }
+    }
+    LaunchedEffect(activity.foreground, homeVisible, media.accountRevision, media.catalogRevision) {
+        if (activity.foreground && homeVisible) media.refreshUpcoming()
     }
     LaunchedEffect(activity.notice) {
         if (activity.notice != null) {
@@ -165,12 +165,11 @@ internal fun ScenicHome(activity: MainActivity) {
                 when {
                     pairing -> PairNamaScreen(activity, onClose = { pairing = false }, onConnected = {
                         pairing = false
-                        scope.launch { media.refresh() }
                     })
                     heading != null -> stateHolder.SaveableStateProvider("title/${heading.id}") {
-                        MediaTitleScreen(activity, heading, { pairing = true }, startEpisode) {
+                        MediaTitleScreen(activity, heading, { pairing = true }, heroEpisode) {
                             title = null
-                            startEpisode = null
+                            heroEpisode = null
                         }
                     }
                     searchOpen -> stateHolder.SaveableStateProvider("search/${searchLibrary?.key ?: "catalog"}") {
@@ -183,7 +182,7 @@ internal fun ScenicHome(activity: MainActivity) {
                                 searchOpen = true
                             }, { pairing = true },
                             onTitle = { title = it },
-                            onEpisode = { startEpisode = it.episode; title = it.title },
+                            onHero = { heroEpisode = it.episode; title = it.title },
                         )
                     }
                 }
@@ -207,7 +206,7 @@ private fun HomeScreen(
     onSearch: (MediaLibrary?) -> Unit,
     onConnect: () -> Unit,
     onTitle: (MediaTitle) -> Unit,
-    onEpisode: (UpcomingEpisode) -> Unit,
+    onHero: (UpcomingEpisode) -> Unit,
 ) {
     val homeGrid = rememberLazyGridState()
     val appGrid = rememberLazyGridState()
@@ -401,7 +400,7 @@ private fun HomeScreen(
                                 heroTitleId = episode.title.id
                                 onFocused(heroKey(heroTitleId))
                             },
-                            play = onEpisode,
+                            open = onHero,
                         ) else if (stageLoading) {
                             Text("Loading titles…", color = secondary, fontSize = 17.sp,
                                 modifier = Modifier.padding(bottom = 12.dp).progressSemantics())
@@ -440,7 +439,7 @@ private fun HomeScreen(
                             val library = MediaLibrary.entries.firstOrNull { it.key == key }
                             MediaShelf(
                                 media, key, label, titles, move, onFocused, onTitle,
-                                onConnect, onRetry = { scope.launch { media.refresh() } },
+                                onConnect, onRetry = { scope.launch { media.refresh(home = false, library = library, force = true) } },
                                 library = library, onSeeAll = { onSearch(library) },
                             )
                         }
@@ -629,7 +628,7 @@ private fun AppTile(
                 val size = Modifier.size(if (height < 90.dp) 38.dp else 46.dp)
                 Image(bitmap.asImageBitmap(), null, size.clip(RoundedCornerShape(9.dp)))
             } else {
-                Image(painterResource(R.drawable.scenic_icon), null, Modifier.size(38.dp))
+                Image(painterResource(R.drawable.banana_icon), null, Modifier.size(38.dp))
             }
         }
     }

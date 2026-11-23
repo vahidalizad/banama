@@ -1,10 +1,10 @@
-# Scenic Home
+# BananaLauncher
 
-A standalone Android TV launcher for the TCL C89L. Open **Scenic Home** from the TV's **Apps** screen. **All apps** scrolls down to the app grid. Hold **OK** on an app for its options. The gear opens the TV settings panel.
+An Android TV launcher by B4Banana. Open **BananaLauncher** from the TV's **Apps** screen. **All apps** scrolls down to the app grid. Hold **OK** on an app for its options. The gear opens the TV settings panel.
 
 Press **Down** from favorites to reach Watchlist, Notify, Liked, and Suggested. The hero loads from watch history and shows upcoming Watchlist episodes as they arrive. Suggested artwork fills the hero when no titles are ready. Each saved list ends with **See all**, which opens Search for that list. The Home header opens catalog Search with release-year and genre filters, release-year and IMDb sorting, and YouTube search. Hold **OK** on the gear to manage the 30nama connection. Pair from a phone using the launcher's QR code.
 
-Scenic Home requests the pairing link directly from 30nama and renders a QR code on the TV. For native access, set `thirtyNama.clientKey` and, if supplied by 30nama, `thirtyNama.api` in the ignored `local.properties` file before building. Use a client identifier intended for distribution in an APK. See [30nama API research](docs/30nama-api.md) for the integration and playback checks.
+BananaLauncher requests the pairing link directly from 30nama and renders a QR code on the TV. For native access, set `thirtyNama.clientKey` and, if supplied by 30nama, `thirtyNama.api` in the ignored `local.properties` file before building. Use a client identifier intended for distribution in an APK. See [30nama API research](docs/30nama-api.md) for the integration and playback checks.
 
 ## Build and test
 
@@ -43,10 +43,18 @@ adb disconnect "$TV"
 exit
 ```
 
-After testing, switch Wireless debugging off on the TV. Keep the Docker volume to update in place with `install -r` and retain favorites and settings. To remove Scenic Home, use the TV's Apps settings. See [AGENTS.md](AGENTS.md) for Docker cleanup.
+After testing, switch Wireless debugging off on the TV. Keep the Docker volume to update in place with `install -r` and retain favorites and settings. To remove BananaLauncher, use the TV's Apps settings. See [AGENTS.md](AGENTS.md) for Docker cleanup.
+
+## Make BananaLauncher the default
+
+After installing the update, open **Settings → Apps → Default apps → Home app** and choose **BananaLauncher**. If the TV hides this menu, use the connected ADB session to open Android's Home picker.
+
+```sh
+adb -s "$TV" shell am start -a android.settings.HOME_SETTINGS
+```
+
+Press **Home** on the remote to check the selection. Choose **Google TV** in the same picker to switch back on the TCL.
 
 ## Update
 
 During a dependency review, check AndroidX and the pinned SDK toolchain for relevant changes. Rebuild and run the tests in Docker, then install over the previous APK using the same signing volume. Check remote focus, Google Play, and the Home hero on the TCL.
-
-The TV banner uses [Murlough Bay](https://commons.wikimedia.org/wiki/File:Murlough_bay_(48770060832).jpg) by Salvatore Gerace, licensed CC0.

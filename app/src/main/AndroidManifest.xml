@@ -15,18 +15,27 @@
 
     <application
         android:allowBackup="false"
-        android:banner="@drawable/scenic_banner"
-        android:icon="@drawable/scenic_icon"
+        android:banner="@drawable/banana_banner"
+        android:icon="@drawable/banana_icon"
         android:label="@string/app_name"
-        android:theme="@style/Theme.Scenic"
+        android:theme="@style/Theme.BananaLauncher"
         android:usesCleartextTraffic="false">
+        <meta-data
+            android:name="tv.scenichome.launcher.AUTHOR"
+            android:value="@string/app_author" />
         <activity
             android:name=".MainActivity"
-            android:banner="@drawable/scenic_banner"
-            android:exported="true">
+            android:banner="@drawable/banana_banner"
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>

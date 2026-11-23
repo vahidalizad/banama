@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Scenic Home</string>
-    <style name="Theme.Scenic" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#10211F</item>
-        <item name="android:colorAccent">#ACDDCA</item>
-        <item name="android:windowActionModeOverlay">true</item>
-    </style>
-</resources>

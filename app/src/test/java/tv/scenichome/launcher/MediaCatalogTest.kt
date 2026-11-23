@@ -8,6 +8,32 @@ import org.junit.Test
 
 class MediaCatalogTest {
     @Test
+    fun homeOnlyReadsWaitUntilHomeReturnsAndRetriesIgnoreDeadlines() {
+        val deadlines = mutableMapOf("account" to 100L, "home" to 110L, "watch" to 120L)
+        val home = RefreshSchedule(true, null, true, deadlines)
+        assertEquals(listOf("notify", "liked"), home.due(90))
+        val title = RefreshSchedule(false, null, true, deadlines)
+        assertEquals(emptyList<String>(), title.due(90))
+        assertEquals(10L, title.delayFrom(90))
+        val watch = RefreshSchedule(false, MediaLibrary.WATCHLIST, true, deadlines)
+        assertEquals(listOf("account", "watch"), watch.due(90, force = true))
+        deadlines["notify"] = 125
+        deadlines["liked"] = 125
+        assertEquals(listOf("account", "home"), home.due(110))
+        assertEquals(listOf("home"), RefreshSchedule(true, null, false, emptyMap()).due(90))
+    }
+
+    @Test
+    fun onlyExplicitMovieTypesCanSkipSeriesDiscovery() {
+        fun type(options: String) =
+            JSONObject("""{"id":1,"title":{"english":"A"},"options":$options}""").mediaTitle()!!.type
+        assertEquals(TitleType.UNKNOWN, type("{}"))
+        assertEquals(TitleType.MOVIE, type("""{"is_series":false}"""))
+        assertEquals(TitleType.MOVIE, type("""{"title_type":"movie"}"""))
+        assertEquals(TitleType.SERIES, type("""{"is_series":false,"title_type":"series"}"""))
+    }
+
+    @Test
     fun emptyLibraryReplyDoesNotMaskAccountOrServerErrors() {
         val reply = JSONObject("""
             {"success":false,"error":true,"status":200,"result":{"page":1,"pages":1,"posts":[]}}

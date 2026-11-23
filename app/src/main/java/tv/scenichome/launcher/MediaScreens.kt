@@ -1,6 +1,7 @@
 package tv.scenichome.launcher
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.text.Html
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
@@ -45,6 +46,7 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -125,7 +127,7 @@ internal fun EpisodeHero(
     selected: UpcomingEpisode,
     move: FocusMove?,
     focused: (UpcomingEpisode) -> Unit,
-    play: (UpcomingEpisode) -> Unit,
+    open: (UpcomingEpisode) -> Unit,
 ) {
     val row = rememberLazyListState()
     LaunchedEffect(move) {
@@ -154,25 +156,19 @@ internal fun EpisodeHero(
             items(episodes, key = { it.title.id }) { episode ->
                 val active = selected.title.id == episode.title.id
                 var hasFocus by remember { mutableStateOf(false) }
-                val label = "Play ${episode.title.name}" +
+                val label = "Open ${episode.title.name}" +
                     (if (episode.title.series) " · ${episode.episode.label()}" else "")
                 val selectedBorder = if (active && !hasFocus) Modifier.border(1.dp, Color(0xBFFFFFFF), RoundedCornerShape(12.dp))
                     else Modifier
                 FocusSurface(
-                    heroKey(episode.title.id), move, { focused(episode) }, { play(episode) },
+                    heroKey(episode.title.id), move, { focused(episode) }, { open(episode) },
                     Modifier.size(106.dp, 60.dp).then(selectedBorder).onFocusChanged { hasFocus = it.isFocused }
                         .semantics { contentDescription = label },
                     fill = panel,
                 ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize()) {
                         CatalogImage(media, episode.title.cover ?: episode.title.poster, Modifier.matchParentSize(), 260)
                         Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = if (active) .17f else .32f)))
-                        if (active) Box(
-                            Modifier.size(32.dp).background(Color.Black.copy(alpha = .72f), CircleShape),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Image(painterResource(R.drawable.media_play), null, Modifier.size(20.dp))
-                        }
                     }
                 }
             }
@@ -289,6 +285,12 @@ internal data class Lookup(
     val revision: Int,
 ) {
     val browse get() = library == null && query.isBlank()
+
+    suspend fun readPage(page: Int, recent: RecentReads<Pair<String, Int>, TitlePage>, read: suspend () -> TitlePage): TitlePage {
+        if (browse || page > SEARCH_PAGE_LIMIT) return read()
+        val serverQuery = if (library == null) query else ""
+        return recent.get(serverQuery to page, read)
+    }
 }
 
 private enum class SearchControl(val label: String, val icon: Int, val apiKey: String? = null) {
@@ -298,6 +300,9 @@ private enum class SearchControl(val label: String, val icon: Int, val apiKey: S
     TYPE("Type", R.drawable.media_episodes, "type"),
     RATING("IMDb rating", R.drawable.media_star, "imdb_rate"),
 }
+
+private const val SEARCH_PAGE_LIMIT = 8
+private const val SEARCH_REUSE_MS = 60_000L
 
 internal class MediaSearchState(val library: MediaLibrary? = null) {
     val input = TextFieldState()
@@ -309,6 +314,7 @@ internal class MediaSearchState(val library: MediaLibrary? = null) {
     var order by mutableStateOf(SearchOrder.DEFAULT)
     var options by mutableStateOf<Map<String, List<BrowseOption>>>(emptyMap())
     private var loaded by mutableStateOf<Lookup?>(null)
+    private var loadedAt = 0L
     var titles by mutableStateOf<List<MediaTitle>>(emptyList())
         private set
     var page by mutableIntStateOf(0)
@@ -321,9 +327,19 @@ internal class MediaSearchState(val library: MediaLibrary? = null) {
         order, library?.let(media::libraryRevision) ?: 0)
     fun matches(key: Lookup) = loaded == key
 
-    suspend fun load(media: MediaStore, key: Lookup, more: Boolean = false) {
+    fun fresh(key: Lookup) = matches(key) && SystemClock.elapsedRealtime() - loadedAt < SEARCH_REUSE_MS
+
+    suspend fun load(
+        media: MediaStore,
+        key: Lookup,
+        recent: RecentReads<Pair<String, Int>, TitlePage>,
+        more: Boolean = false,
+        retry: Boolean = false,
+    ) {
         val start = if (more && key == loaded) page + 1 else 1
-        val accumulated = (if (start > 1) titles else emptyList()).associateByTo(linkedMapOf(), MediaTitle::id)
+        val through = if (!more && matches(key)) page else start
+        val previous = if (start > 1) titles else emptyList()
+        val accumulated = withContext(Dispatchers.Default) { previous.associateByTo(linkedMapOf(), MediaTitle::id) }
         val clientSort = !key.browse && key.order != SearchOrder.DEFAULT
         val parameters = if (key.browse) browseParameters(
             key.type, key.genres.map(BrowseOption::value).toSet(), key.years, key.rating, key.order,
@@ -331,23 +347,34 @@ internal class MediaSearchState(val library: MediaLibrary? = null) {
         var position = start
         var lastPage: Int
         do {
-            val found = when {
-                key.library != null -> media.list(key.library, position)
-                key.browse -> media.browse(parameters, key.order, position)
-                else -> media.search(key.query, position)
+            val found = key.readPage(position, recent) {
+                when {
+                    key.library != null -> media.list(key.library, position, retry)
+                    key.browse -> media.browse(parameters, key.order, position)
+                    else -> media.search(key.query, position)
+                }
             }
             if (key != lookupKey(media)) return
             val sizeBefore = accumulated.size
             // shortcut: sparse release years can skip server pages, use a year-set filter when the API supports one.
-            found.titles.filter { title ->
-                title.matchesRelease(key.years) && (key.browse || title.matchesGenre(key.genres)) &&
-                    (key.library == null || title.matchesLibraryQuery(key.query))
-            }.forEach { accumulated.putIfAbsent(it.id, it) }
+            withContext(Dispatchers.Default) {
+                for (title in found.titles) {
+                    if (title.matchesRelease(key.years) && (key.browse || title.matchesGenre(key.genres)) &&
+                        (key.library == null || title.matchesLibraryQuery(key.query))) {
+                        accumulated.putIfAbsent(title.id, title)
+                    }
+                }
+            }
             lastPage = found.pages
             position++
-        } while (position <= lastPage && (clientSort || accumulated.size == sizeBefore))
+        } while (position <= lastPage && (clientSort || position <= through || accumulated.size == sizeBefore))
+        val result = withContext(Dispatchers.Default) {
+            accumulated.values.toList().let { if (clientSort) key.order.sort(it) else it }
+        }
+        if (key != lookupKey(media)) return
         loaded = key
-        titles = accumulated.values.toList().let { if (clientSort) key.order.sort(it) else it }
+        if (start == 1) loadedAt = SystemClock.elapsedRealtime()
+        titles = result
         page = position - 1
         pages = lastPage
     }
@@ -371,13 +398,17 @@ internal fun MediaSearchScreen(
     var keyboardRequested by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
-    var retry by remember { mutableIntStateOf(0) }
     var focused by rememberSaveable { mutableStateOf("search/input") }
     var move by remember { mutableStateOf(FocusMove(focused, 0)) }
     var chosenFilter by remember { mutableStateOf<SearchControl?>(null) }
     var filterLoading by remember { mutableStateOf(false) }
     var filterFailed by remember { mutableStateOf(false) }
     val request = state.lookupKey(media)
+    var retry by remember(request) { mutableIntStateOf(0) }
+    var submittedQuery by remember(state) { mutableStateOf<String?>(null) }
+    val recent = remember(state, request.revision, retry, media.accountRevision) {
+        RecentReads<Pair<String, Int>, TitlePage>(SEARCH_PAGE_LIMIT, SEARCH_REUSE_MS)
+    }
     val searchable = media.configured && (state.library == null || media.connected)
 
     fun leaveSearchInput(goToResult: Boolean) {
@@ -407,14 +438,17 @@ internal fun MediaSearchScreen(
         }
     }
 
-    LaunchedEffect(request, searchable, retry) {
-        if (!searchable || (retry == 0 && state.matches(request))) return@LaunchedEffect
+    LaunchedEffect(request, searchable, retry, activity.foreground) {
+        if (!activity.foreground || !searchable || (retry == 0 && state.fresh(request))) return@LaunchedEffect
+        val reloading = state.matches(request)
+        if (reloading) recent.clear()
         failed = false
         busy = true
         try {
-            if (state.query.isNotBlank()) delay(320)
-            grid.scrollToItem(0)
-            failed = tryNama { state.load(media, request) }.isFailure
+            if (request.query.isNotBlank() && request.query != submittedQuery) delay(320)
+            submittedQuery = request.query
+            if (!reloading) grid.scrollToItem(0)
+            failed = tryNama { state.load(media, request, recent, retry = retry > 0) }.isFailure
             if (!failed && focused.startsWith("search/title/") && state.titles.none { "search/title/${it.id}" == focused }) {
                 val next = state.titles.firstOrNull()?.let { "search/title/${it.id}" } ?: "search/input"
                 move = FocusMove(next, (move?.revision ?: 0) + 1)
@@ -552,7 +586,7 @@ internal fun MediaSearchScreen(
                                     if (busy) return@Action
                                     busy = true
                                     scope.launch {
-                                        val result = tryNama { state.load(media, request, more = true) }
+                                        val result = tryNama { state.load(media, request, recent, more = true) }
                                         if (request == state.lookupKey(media)) {
                                             failed = result.isFailure
                                             busy = false
@@ -924,15 +958,15 @@ internal fun MediaTitleScreen(
     activity: MainActivity,
     original: MediaTitle,
     onConnect: () -> Unit,
-    startEpisode: EpisodeNumber?,
+    heroEpisode: EpisodeNumber?,
     onClose: () -> Unit,
 ) {
     val media = activity.media
     val scope = rememberCoroutineScope()
     var title by remember(original.id) { mutableStateOf(original) }
-    var catalog by remember { mutableStateOf<PlaybackCatalog?>(null) }
-    var playing by remember { mutableStateOf<MediaEpisode?>(null) }
-    var picking by remember { mutableStateOf(false) }
+    var catalog by remember(original.id, media.accountRevision) { mutableStateOf<PlaybackCatalog?>(null) }
+    var playing by remember(original.id, media.accountRevision) { mutableStateOf<MediaEpisode?>(null) }
+    var picking by remember(original.id, media.accountRevision) { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var actionFocus by remember { mutableStateOf(FocusMove("title/play", 0)) }
@@ -940,38 +974,34 @@ internal fun MediaTitleScreen(
     val detailScroll = rememberScrollState()
     val scrollStep = with(LocalDensity.current) { 80.dp.roundToPx() }
 
-    suspend fun startPlayback(requested: EpisodeNumber? = null) {
+    suspend fun startPlayback() {
         busy = true
         notice = null
         val data = tryNama { media.playback(title) }.getOrNull()
-        val requestedEpisode = requested?.let { key ->
-            if (title.series) data?.episodes?.firstOrNull { it.key == key } else data?.episodes?.firstOrNull()
-        }
-        if (data == null || data.episodes.isEmpty() || (requested != null && requestedEpisode == null)) {
+        if (data == null || data.episodes.isEmpty()) {
             notice = if (media.account?.days?.let { it <= 0 } == true) GOLD_EXPIRED
                 else "No playable source is available right now."
             actionFocus = FocusMove("title/play", actionFocus.revision + 1)
         } else {
             catalog = data
-            if (title.series && requested == null) picking = true
+            val requestedEpisode = heroEpisode?.let { key -> data.episodes.firstOrNull { it.key == key } }
+            if (title.series && requestedEpisode == null) picking = true
             else playing = requestedEpisode ?: data.episodes.first()
         }
         busy = false
     }
 
-    LaunchedEffect(original.id) {
+    DisposableEffect(original.id, media.accountRevision) { onDispose { media.clearPlaybackReads() } }
+    LaunchedEffect(original.id, media.accountRevision) {
         tryNama { media.detail(original) }.getOrNull()?.let { title = it }
-        if (startEpisode != null) startPlayback(startEpisode)
-        else tryNama { media.refreshTitlePosition(title) }
+        tryNama { media.refreshTitlePosition(title) }
     }
     val video = catalog
     val episode = playing
     if (video != null && episode != null) {
         MediaPlayerScreen(activity, title, video, episode, onEpisode = { playing = it }, onClose = {
-            if (startEpisode != null) onClose() else {
-                playing = null
-                actionFocus = FocusMove("title/play", actionFocus.revision + 1)
-            }
+            playing = null
+            actionFocus = FocusMove("title/play", actionFocus.revision + 1)
         })
         return
     }
@@ -1035,11 +1065,12 @@ internal fun MediaTitleScreen(
                 MediaIconButton(
                     if (saved) labels.second else labels.first, if (saved) icons.second else icons.first,
                     "title/$group", actionFocus, { focusedAction = it }, enabled = !busy,
+                    saved = saved.takeIf { media.knows(group) },
                 ) {
                     if (!media.connected || !media.configured) onConnect() else scope.launch {
                         if (!media.knows(group)) {
                             notice = "Your lists are still unavailable. Try again in a moment."
-                            media.refresh()
+                            media.refresh(home = false, force = true)
                             return@launch
                         }
                         busy = true
