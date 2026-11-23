@@ -1,23 +1,33 @@
 package tv.scenichome.launcher
 
+import android.graphics.Typeface
 import android.net.Uri
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -28,10 +38,23 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.doOnLayout
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -41,14 +64,51 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.Log
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Text
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
-private enum class Source { HLS, FIND_DOWNLOAD, DOWNLOAD, ASK_HD, HD, UNAVAILABLE }
+private enum class Source { HLS, FIND_DOWNLOAD, DOWNLOAD, HD, UNAVAILABLE }
 
 private data class TextTrack(val group: Tracks.Group, val index: Int, val name: String)
+private data class VideoQuality(val source: Source, val height: Int = 0) {
+    val label get() = when (source) {
+        Source.DOWNLOAD -> "4K Download"
+        Source.HLS -> "4K Stream"
+        else -> "${height}p"
+    }
+}
+
+private const val SEEK_JUMP = 30_000L
+
+private fun Tracks.Group.videoHeight(index: Int): Int? {
+    val format = getTrackFormat(index)
+    if (!isTrackSupported(index) || format.width <= 0 || format.height <= 0) return null
+    return if (isUhd(format.width, format.height)) 2160 else format.height
+}
+
+private fun Tracks.videoQualities(): List<Int> =
+    groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+        .flatMap { group -> (0 until group.length).mapNotNull(group::videoHeight) }.distinct().sortedDescending()
+
+private fun Tracks.videoOverride(source: Source, hdHeight: Int?): TrackSelectionOverride? =
+    groups.filter { it.type == C.TRACK_TYPE_VIDEO }.flatMap { group ->
+        (0 until group.length).filter { index ->
+            val height = group.videoHeight(index) ?: return@filter false
+            if (source == Source.HD) height < 2160 && (hdHeight == null || hdHeight == height) else height == 2160
+        }.map { group to it }
+    }.maxWithOrNull(compareBy(
+        { (group, index) -> group.videoHeight(index) ?: 0 },
+        { (group, index) -> group.getTrackFormat(index).bitrate },
+        { (group, index) -> group.getTrackFormat(index).width },
+    ))?.let { (group, index) -> TrackSelectionOverride(group.mediaTrackGroup, index) }
 
 private fun Caption.subtitle(): MediaItem.SubtitleConfiguration {
     val path = httpsUri(url)?.path.orEmpty().lowercase(Locale.ROOT)
@@ -82,41 +142,101 @@ internal fun MediaPlayerScreen(
     onEpisode: (MediaEpisode) -> Unit,
     onClose: () -> Unit,
 ) {
-    BackHandler(onBack = onClose)
     val player = remember {
         Log.setLogLevel(Log.LOG_LEVEL_OFF)
         ExoPlayer.Builder(activity).build()
     }
     var source by remember(episode) { mutableStateOf(if (episode.hls == null) Source.FIND_DOWNLOAD else Source.HLS) }
     var candidate by remember(episode) { mutableStateOf<DownloadVideo?>(null) }
-    val testedDownloads = remember(episode) { mutableSetOf<String>() }
-    var lowerHls by remember(episode) { mutableStateOf(false) }
-    var allowHd by remember { mutableStateOf(false) }
+    var downloadOptions by remember(episode) { mutableStateOf<List<DownloadVideo>?>(null) }
+    var nextDownload by remember(episode) { mutableIntStateOf(0) }
+    var hlsQualities by remember(episode) { mutableStateOf<List<Int>>(emptyList()) }
+    var hdHeight by remember(episode) { mutableStateOf<Int?>(null) }
+    var returnToStream by remember(episode) { mutableStateOf<Source?>(null) }
     var ready by remember(episode) { mutableStateOf(false) }
     var preparing by remember(episode) { mutableStateOf(false) }
     var running by remember { mutableStateOf(false) }
+    var playRequested by remember(episode) { mutableStateOf(false) }
     var ended by remember(episode) { mutableStateOf(false) }
     var quality by remember(episode) { mutableStateOf("") }
     var tracks by remember(episode) { mutableStateOf<List<TextTrack>>(emptyList()) }
     var captionName by remember { mutableStateOf<String?>(null) }
-    var seconds by remember(episode) { mutableStateOf(0L) }
-    var duration by remember(episode) { mutableStateOf(0L) }
+    var elapsedMs by remember(episode) { mutableLongStateOf(0L) }
+    var durationMs by remember(episode) { mutableLongStateOf(0L) }
+    var scrubMs by remember(episode) { mutableStateOf<Long?>(null) }
     var dialog by remember { mutableStateOf<String?>(null) }
+    var checkingQualities by remember(episode) { mutableStateOf(false) }
     var controls by remember(episode) { mutableStateOf(true) }
+    var controlsHeightPx by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val subtitleGapPx = with(density) { 20.dp.roundToPx() }
     var interaction by remember { mutableIntStateOf(0) }
-    var selected by remember { mutableStateOf("player/play") }
-    var move by remember { mutableStateOf(FocusMove("player/play", 0)) }
+    var selected by remember(episode) { mutableStateOf("player/timeline") }
+    var move by remember { mutableStateOf(FocusMove("player/timeline", 0)) }
+    val accountRevision = remember(title.id) { activity.media.accountRevision }
     var position by remember(episode) {
-        mutableStateOf(if (catalog.resumeFile > 0 && catalog.resumeFile == episode.fileId) catalog.resumeMs else 0L)
+        mutableLongStateOf(activity.media.lastPlayed(title.id)?.takeIf { it.episode == episode.key }?.timeMs ?: 0L)
     }
+    var lastSaved by remember(episode) { mutableLongStateOf(-1L) }
+    var playAfterSwitch by remember(episode) { mutableStateOf(true) }
     val hiddenFocus = remember { FocusRequester() }
+    val nextEpisode = remember(catalog, episode) { if (title.series) catalog.nextEpisode(episode) else null }
+
+    fun saveProgress() {
+        if (!ready) return
+        val time = player.currentPosition
+        val durationMs = player.duration
+        if (time !in 1_000L..durationMs || time / 1000 == lastSaved) return
+        lastSaved = time / 1000
+        val report = source == Source.HLS || source == Source.HD
+        activity.lifecycleScope.launch {
+            activity.media.recordProgress(title.id, episode, time, durationMs, accountRevision, report)
+        }
+    }
+
+    BackHandler {
+        if (scrubMs != null) {
+            scrubMs = null
+            interaction++
+        } else {
+            saveProgress()
+            onClose()
+        }
+    }
+
+    fun rememberPlayback() {
+        if (ready) {
+            position = player.currentPosition
+            playAfterSwitch = player.playWhenReady
+        }
+    }
 
     fun nextAfterFailure() {
-        if (source == Source.HLS && ready) position = player.currentPosition
+        rememberPlayback()
+        if (source == Source.DOWNLOAD) candidate = null
         preparing = false
+        ready = false
         source = when (source) {
             Source.HLS, Source.DOWNLOAD -> Source.FIND_DOWNLOAD
             else -> Source.UNAVAILABLE
+        }
+    }
+
+    suspend fun findDownload(): DownloadVideo? {
+        candidate?.let { return it }
+        val options = downloadOptions ?: tryNama { activity.media.alternatives(title, episode) }.getOrNull()
+            ?.let { releases ->
+                coroutineScope {
+                    releases.chunked(4).flatMap { batch ->
+                        batch.map { release ->
+                            async { seekableDownloadSize(release.url)?.let { release to it } }
+                        }.awaitAll().filterNotNull()
+                    }.sortedByDescending { it.second }.map { it.first }
+                }
+            }?.also { downloadOptions = it }.orEmpty()
+        return options.getOrNull(nextDownload)?.also {
+            nextDownload++
+            candidate = it
         }
     }
 
@@ -138,18 +258,15 @@ internal fun MediaPlayerScreen(
                 }
                 running = player.isPlaying
                 ended = player.playbackState == Player.STATE_ENDED
+                playRequested = player.playWhenReady && !ended
                 val size = player.videoSize
                 if (size.height > 0) {
                     quality = if (isUhd(size.width, size.height)) "4K · ${size.width} × ${size.height}" else "${size.height}p"
                 }
-                if (events.contains(Player.EVENT_TRACKS_CHANGED)) tracks = player.currentTracks.textTracks()
-                if (source == Source.HLS) {
-                    lowerHls = lowerHls || player.currentTracks.groups.any { group ->
-                        group.type == C.TRACK_TYPE_VIDEO && (0 until group.length).any { index ->
-                            val format = group.getTrackFormat(index)
-                            group.isTrackSupported(index) && format.width > 0 && format.height > 0 &&
-                                !isUhd(format.width, format.height)
-                        }
+                if (events.contains(Player.EVENT_TRACKS_CHANGED)) {
+                    tracks = player.currentTracks.textTracks()
+                    if (source == Source.HLS || source == Source.HD) {
+                        player.currentTracks.videoQualities().takeIf { it.isNotEmpty() }?.let { hlsQualities = it }
                     }
                 }
                 if (ready || player.playbackState != Player.STATE_READY) return
@@ -157,15 +274,7 @@ internal fun MediaPlayerScreen(
                     nextAfterFailure()
                     return
                 }
-                val requested = player.currentTracks.groups.firstNotNullOfOrNull { group ->
-                    if (group.type != C.TRACK_TYPE_VIDEO) return@firstNotNullOfOrNull null
-                    val indices = (0 until group.length).filter { index ->
-                        val format = group.getTrackFormat(index)
-                        group.isTrackSupported(index) && format.width > 0 && format.height > 0 &&
-                            (isUhd(format.width, format.height) == (source != Source.HD))
-                    }
-                    if (indices.isEmpty()) null else TrackSelectionOverride(group.mediaTrackGroup, indices)
-                }
+                val requested = player.currentTracks.videoOverride(source, hdHeight)
                 if (requested == null) {
                     nextAfterFailure()
                     return
@@ -173,8 +282,9 @@ internal fun MediaPlayerScreen(
                 ready = true
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                     .setOverrideForType(requested).build()
+                if (player.duration > 0 && position >= player.duration) player.seekTo(0)
                 selectCaption(tracks.firstOrNull { it.name == captionName })
-                if (activity.foreground) player.play()
+                if (activity.foreground && playAfterSwitch) player.play()
             }
         }
         player.addListener(listener)
@@ -189,17 +299,18 @@ internal fun MediaPlayerScreen(
         quality = ""
         tracks = emptyList()
         running = false
+        playRequested = false
         ended = false
         controls = true
         when (source) {
             Source.FIND_DOWNLOAD -> {
-                val options = tryNama { activity.media.alternatives(title, catalog, episode) }.getOrNull().orEmpty()
-                candidate = options.firstOrNull { testedDownloads.add(it.url) && supportsByteSeeking(it.url) }
+                val available = findDownload()
+                val previous = returnToStream
                 source = when {
-                    candidate != null -> Source.DOWNLOAD
-                    !lowerHls -> Source.UNAVAILABLE
-                    allowHd -> Source.HD
-                    else -> Source.ASK_HD
+                    available != null -> Source.DOWNLOAD
+                    previous != null -> previous.also { returnToStream = null }
+                    hlsQualities.none { it < 2160 } -> Source.UNAVAILABLE
+                    else -> Source.HD
                 }
             }
             Source.HLS, Source.HD, Source.DOWNLOAD -> {
@@ -217,63 +328,195 @@ internal fun MediaPlayerScreen(
                     .clearOverrides().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                 player.playWhenReady = false
                 preparing = true
-                player.setMediaItem(item.build(), if (hls) position else 0L)
+                player.setMediaItem(item.build(), position)
                 player.prepare()
                 delay(20_000)
                 if (preparing && (!ready || quality.isBlank() || (source != Source.HD && !quality.startsWith("4K")))) {
                     nextAfterFailure()
                 }
             }
-            Source.ASK_HD, Source.UNAVAILABLE -> Unit
+            Source.UNAVAILABLE -> Unit
         }
     }
     LaunchedEffect(episode, source) {
         while (true) {
-            seconds = player.currentPosition / 1000
-            duration = player.duration.coerceAtLeast(0) / 1000
+            elapsedMs = player.currentPosition.coerceAtLeast(0)
+            durationMs = player.duration.coerceAtLeast(0)
             delay(500)
         }
     }
-    LaunchedEffect(activity.foreground) { if (!activity.foreground) player.pause() }
-    LaunchedEffect(running, controls, dialog, interaction) {
-        if (running && controls && dialog == null) {
+    LaunchedEffect(episode, dialog) {
+        if (dialog == "quality") {
+            checkingQualities = true
+            try {
+                findDownload()
+            } finally {
+                checkingQualities = false
+            }
+        }
+    }
+    LaunchedEffect(activity.foreground) {
+        if (!activity.foreground) {
+            saveProgress()
+            player.pause()
+        }
+    }
+    LaunchedEffect(episode, running, ended) {
+        if (ended) {
+            saveProgress()
+            controls = true
+        }
+        while (running) {
+            delay(30_000)
+            saveProgress()
+        }
+    }
+
+    val canSeek = ready && player.isCurrentMediaItemSeekable && durationMs > 0
+    val chapterEnd = if (canSeek && !ended && source != Source.DOWNLOAD) {
+        episode.markers.intro?.takeIf { elapsedMs in it && it.last < durationMs }?.let { it.last + 1 }
+    } else null
+    val credits = canSeek && !ended && source != Source.DOWNLOAD &&
+        episode.markers.creditsMs?.let { elapsedMs in it..<durationMs } == true
+    val chapterLabel = when {
+        chapterEnd != null -> "Skip intro"
+        credits && nextEpisode != null -> "Next episode"
+        credits -> "Skip credits"
+        else -> null
+    }
+    val chapterId = if (credits && nextEpisode != null) "player/next" else "player/chapter"
+    LaunchedEffect(running, controls, dialog, interaction, scrubMs) {
+        if (running && controls && dialog == null && scrubMs == null) {
             delay(6_000)
             controls = false
         }
     }
-    LaunchedEffect(controls, ready, dialog, episode) {
-        if (controls && ready && dialog == null) {
-            move = FocusMove(selected, move.revision + 1)
-        } else if (!controls) {
+    LaunchedEffect(controls, ready, dialog, episode, chapterLabel, ended) {
+        if (!ready || dialog != null) return@LaunchedEffect
+        val focus = when {
+            !controls -> chapterId.takeIf { chapterLabel != null }
+            ended -> if (nextEpisode != null) "player/next" else "player/play"
+            selected == "player/chapter" && chapterLabel == null -> "player/timeline"
+            else -> selected
+        }
+        if (focus == null) {
             withFrameNanos { }
             hiddenFocus.requestFocus()
+        } else {
+            move = FocusMove(focus, move.revision + 1)
         }
     }
 
-    fun seek(ms: Long) {
-        if (ready && player.isCurrentMediaItemSeekable) {
-            player.seekTo((player.currentPosition + ms).coerceIn(0, player.duration.coerceAtLeast(0)))
+    fun seekTo(target: Long) {
+        if (canSeek) {
+            elapsedMs = target.coerceIn(0, durationMs)
+            player.seekTo(elapsedMs)
         }
+    }
+
+    fun setPlaying(play: Boolean) {
+        if (play) {
+            if (ended) seekTo(0)
+            player.play()
+        } else {
+            saveProgress()
+            player.pause()
+        }
+    }
+
+    fun switchEpisode(target: MediaEpisode) {
+        dialog = null
+        if (target != episode) {
+            saveProgress()
+            onEpisode(target)
+        }
+    }
+
+    fun switchQuality(choice: VideoQuality) {
+        val height = choice.height.takeIf { choice.source == Source.HD }
+        if (source == choice.source) {
+            if (choice.source == Source.HD && height != hdHeight) {
+                player.currentTracks.videoOverride(Source.HD, height)?.let {
+                    hdHeight = height
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                        .setOverrideForType(it).build()
+                }
+            }
+        } else {
+            saveProgress()
+            rememberPlayback()
+            if (choice.source == Source.DOWNLOAD) returnToStream = source
+            else {
+                returnToStream = null
+                hdHeight = height
+            }
+            source = choice.source
+        }
+        dialog = null
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { key ->
         val event = key.nativeKeyEvent
         interaction++
         if (dialog != null || !ready) return@onPreviewKeyEvent false
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { if (player.isPlaying) player.pause() else player.play(); true }
-                KeyEvent.KEYCODE_MEDIA_REWIND -> { seek(-10_000L); true }
-                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seek(30_000L); true }
-                else -> false
+        val down = event.action == KeyEvent.ACTION_DOWN
+        val keyCode = event.keyCode
+        when {
+            keyCode in setOf(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE) -> {
+                if (down && event.repeatCount == 0) setPlaying(
+                    if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) !player.playWhenReady else keyCode == KeyEvent.KEYCODE_MEDIA_PLAY,
+                )
+                true
             }
-        } else if (!controls && event.action == KeyEvent.ACTION_UP && event.keyCode in setOf(
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-            )) {
-            controls = true
-            true
-        } else false
+            keyCode == KeyEvent.KEYCODE_MEDIA_REWIND || keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                if (down) seekTo(elapsedMs + if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) -SEEK_JUMP else SEEK_JUMP)
+                true
+            }
+            (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+                (!controls || selected == "player/timeline") -> {
+                if (down) {
+                    val direction = if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                    val scrub = scrubMs
+                    if (scrub == null) seekTo(elapsedMs + direction * SEEK_JUMP)
+                    else scrubMs = (scrub + direction * 10_000L).coerceIn(0, durationMs)
+                    if (!controls) {
+                        selected = "player/timeline"
+                        controls = true
+                    }
+                }
+                true
+            }
+            keyCode == KeyEvent.KEYCODE_DPAD_UP -> {
+                if (down && controls) {
+                    scrubMs = null
+                    controls = false
+                }
+                true
+            }
+            keyCode == KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (scrubMs != null) true
+                else if (!controls) {
+                    if (down) {
+                        selected = "player/play"
+                        controls = true
+                    }
+                    true
+                } else if (selected == "player/timeline") {
+                    if (down) move = FocusMove("player/play", move.revision + 1)
+                    true
+                } else false
+            }
+            !controls && chapterLabel == null &&
+                (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) -> {
+                if (event.action == KeyEvent.ACTION_UP) {
+                    setPlaying(!player.playWhenReady || ended)
+                    selected = "player/play"
+                    controls = true
+                }
+                true
+            }
+            else -> false
+        }
     }) {
         val visibleVideo = ready && quality.isNotBlank() &&
             (source == Source.HD || quality.startsWith("4K"))
@@ -285,58 +528,109 @@ internal fun MediaPlayerScreen(
                     it.isFocusableInTouchMode = false
                     it.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
                     it.player = player
+                    it.subtitleView?.apply {
+                        setApplyEmbeddedStyles(false)
+                        setStyle(CaptionStyleCompat(
+                            android.graphics.Color.WHITE, 0x80000000.toInt(), android.graphics.Color.TRANSPARENT,
+                            CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW, android.graphics.Color.BLACK,
+                            Typeface.create("sans-serif", Typeface.NORMAL),
+                        ))
+                        setFractionalTextSize(.045f)
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),
+            update = { view ->
+                val overlayHeight = if (controls && ready) controlsHeightPx else 0
+                view.subtitleView?.doOnLayout { captions ->
+                    val minimum = .105f
+                    val padding = if (overlayHeight > 0 && captions.height > 0) {
+                        val letterbox = (view.height - captions.height).coerceAtLeast(0) / 2
+                        (overlayHeight - letterbox + subtitleGapPx).toFloat() / captions.height
+                    } else minimum
+                    view.subtitleView?.setBottomPaddingFraction(padding.coerceIn(minimum, .55f))
+                }
+            },
             onRelease = { it.player = null },
         )
         if (!visibleVideo) Box(Modifier.fillMaxSize().background(Color.Black))
-        if (!controls) Box(Modifier.fillMaxSize().focusRequester(hiddenFocus).focusable())
-        if (!visibleVideo && source !in listOf(Source.ASK_HD, Source.UNAVAILABLE)) {
-            Text(if (source == Source.FIND_DOWNLOAD) "Checking 4K downloads…" else "Preparing playback…",
-                Modifier.align(Alignment.Center), fontSize = 21.sp)
+        if (!controls && chapterLabel == null) Box(Modifier.fillMaxSize().focusRequester(hiddenFocus).focusable())
+        if (!visibleVideo && source != Source.UNAVAILABLE) {
+            Text("Preparing playback…", Modifier.align(Alignment.Center), fontSize = 21.sp)
         }
         if (controls && ready) {
             Column(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { controlsHeightPx = it.height }
+                    .background(Brush.verticalGradient(
                     listOf(Color.Transparent, Color(0xE9000000)),
-                )).padding(horizontal = 40.dp, vertical = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
+                )).padding(start = 40.dp, end = 40.dp, top = 28.dp, bottom = 22.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 val heading = listOfNotNull(title.name, if (title.series) "S${episode.season} · E${episode.number}" else null)
-                Text(heading.joinToString("  "), fontSize = 23.sp)
-                Text(listOf(quality, "${clockTime(seconds)} / ${clockTime(duration)}").filter(String::isNotBlank).joinToString("   ·   "),
-                    color = secondary, fontSize = 16.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Action("−10 s", { seek(-10_000L) }, "player/back", move, { selected = it })
-                    Action(if (running) "Pause" else if (ended) "Replay" else "Play", {
-                        if (player.isPlaying) player.pause() else {
-                            if (ended) player.seekTo(0)
-                            player.play()
+                Text(heading.joinToString("  "), fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Box(Modifier.fillMaxWidth().height(56.dp)) {
+                    if (nextEpisode != null && !(credits && chapterLabel == "Next episode")) {
+                        MediaIconButton(
+                            "Next episode", R.drawable.media_next_episode, "player/next", move, { selected = it },
+                            modifier = Modifier.align(Alignment.CenterStart).size(48.dp),
+                        ) { switchEpisode(nextEpisode) }
+                    }
+                    MediaIconButton(
+                        if (playRequested) "Pause" else if (ended) "Replay" else "Play",
+                        if (playRequested) R.drawable.media_pause else R.drawable.media_play,
+                        "player/play", move, { selected = it },
+                        modifier = Modifier.align(Alignment.Center).size(56.dp), shape = CircleShape,
+                    ) { setPlaying(!player.playWhenReady || ended) }
+                    Row(Modifier.align(Alignment.CenterEnd), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MediaIconButton("Subtitles", R.drawable.media_subtitles, "player/subtitles", move, { selected = it }) {
+                            dialog = "subtitles"
                         }
-                    }, "player/play", move, { selected = it })
-                    Action("+30 s", { seek(30_000L) }, "player/forward", move, { selected = it })
-                    Action("Subtitles", { dialog = "subtitles" }, "player/subtitles", move, { selected = it })
-                    if (title.series) Action("Episodes", { dialog = "episodes" }, "player/episodes", move, { selected = it })
+                        if (title.series) MediaIconButton("Episodes", R.drawable.media_episodes, "player/episodes", move,
+                            { selected = it }) { dialog = "episodes" }
+                        Action(quality.ifBlank { "Quality" }, {
+                            checkingQualities = true
+                            dialog = "quality"
+                        }, "player/quality", move, { selected = it },
+                            modifier = Modifier.semantics { contentDescription = "Quality" }, icon = R.drawable.media_quality)
+                    }
+                }
+                PlaybackTimeline(
+                    scrubMs ?: elapsedMs, durationMs, scrubMs != null, selected == "player/timeline", move, { selected = it },
+                ) {
+                    if (canSeek) {
+                        val scrub = scrubMs
+                        if (scrub == null) scrubMs = elapsedMs else {
+                            seekTo(scrub)
+                            scrubMs = null
+                        }
+                    }
                 }
             }
         }
+        if (chapterLabel != null) Action(
+            chapterLabel,
+            {
+                when {
+                    chapterEnd != null -> seekTo(chapterEnd)
+                    nextEpisode != null -> switchEpisode(nextEpisode)
+                    else -> seekTo(durationMs)
+                }
+            },
+            chapterId, move, { selected = it },
+            Modifier.align(Alignment.BottomEnd).padding(
+                end = 40.dp, bottom = if (controls) with(density) { controlsHeightPx.toDp() } + 12.dp else 26.dp,
+            ),
+            icon = R.drawable.media_next_episode,
+        )
     }
     when {
-        source == Source.ASK_HD -> MediaDialog(
-            "Play in HD?", "A compatible 4K source is unavailable for this title.",
-            listOf("Play in HD", "Back"), close = onClose,
-        ) {
-            if (it == 0) {
-                allowHd = true
-                source = Source.HD
-            } else onClose()
-        }
         source == Source.UNAVAILABLE -> MediaDialog(
             "Can’t play this title", "30nama didn’t provide a compatible source.",
             listOf("Back"), close = onClose,
         ) { onClose() }
-        dialog == "subtitles" -> MediaDialog("Subtitles", null, listOf("Off") + tracks.map(TextTrack::name),
+        dialog == "subtitles" -> MediaDialog("Subtitles", "No subtitles are available for this source.".takeIf { tracks.isEmpty() },
+            listOf("Off") + tracks.map(TextTrack::name),
             initial = tracks.indexOfFirst { it.name == captionName } + 1, close = { dialog = null }) {
             val track = tracks.getOrNull(it - 1)
             captionName = track?.name
@@ -344,13 +638,95 @@ internal fun MediaPlayerScreen(
             dialog = null
             interaction++
         }
-        dialog == "episodes" -> EpisodePicker(catalog.episodes, episode, { dialog = null }) {
-            dialog = null
-            onEpisode(it)
+        dialog == "episodes" -> EpisodePicker(
+            catalog.episodes, episode, activity.media.lastPlayed(title.id), { dialog = null }, ::switchEpisode,
+        )
+        dialog == "quality" && checkingQualities -> MediaDialog(
+            "Quality", "Checking available qualities…", listOf("Back"), close = { dialog = null },
+        ) { dialog = null }
+        dialog == "quality" -> {
+            val choices = buildList {
+                if (2160 in hlsQualities) add(VideoQuality(Source.HLS, 2160))
+                if (candidate != null) add(VideoQuality(Source.DOWNLOAD, 2160))
+                hlsQualities.filter { it < 2160 }.forEach { add(VideoQuality(Source.HD, it)) }
+            }
+            val currentHeight = if (source == Source.HD) hdHeight ?: player.videoSize.height else 2160
+            MediaDialog(
+                "Quality", "Playback can continue at its current quality.".takeIf { choices.isEmpty() },
+                choices.map(VideoQuality::label).ifEmpty { listOf("Back") },
+                initial = choices.indexOf(VideoQuality(source, currentHeight)).coerceAtLeast(0),
+                close = { dialog = null },
+            ) { index -> choices.getOrNull(index)?.let(::switchQuality) ?: run { dialog = null } }
         }
     }
 }
 
-private fun clockTime(seconds: Long): String = if (seconds >= 3600) {
+@Composable
+private fun PlaybackTimeline(
+    positionMs: Long,
+    durationMs: Long,
+    scrubbing: Boolean,
+    focused: Boolean,
+    move: FocusMove?,
+    onFocused: (String) -> Unit,
+    click: () -> Unit,
+) {
+    val fraction = if (durationMs > 0) (positionMs.toDouble() / durationMs).toFloat().coerceIn(0f, 1f) else 0f
+    val time = clockTime(positionMs / 1000)
+    val total = clockTime(durationMs / 1000)
+    FocusSurface(
+        "player/timeline", move, onFocused, click,
+        Modifier.fillMaxWidth().height(48.dp).semantics {
+            contentDescription = if (scrubbing) "Seek preview, $time of $total" else "Seek, $time of $total"
+            progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+        },
+        fill = Color.Transparent,
+    ) {
+        Column(
+            Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(time, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(total, color = secondary, fontSize = 14.sp)
+            }
+            BoxWithConstraints(Modifier.fillMaxWidth().height(12.dp)) {
+                val rail = RoundedCornerShape(3.dp)
+                Box(Modifier.align(Alignment.Center).fillMaxWidth().height(if (focused) 5.dp else 4.dp)
+                    .background(Brush.horizontalGradient(listOf(Color(0x575F656D), Color(0x62797E86))), rail)) {
+                    Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(
+                        Brush.horizontalGradient(listOf(Color(0xFF9CA4AF), Color.White)), rail,
+                    ))
+                }
+                if (focused) {
+                    val thumb = if (scrubbing) 12.dp else 10.dp
+                    Box(Modifier.align(Alignment.CenterStart).offset(x = (maxWidth - thumb).coerceAtLeast(0.dp) * fraction)
+                        .size(thumb).background(Color.White, CircleShape))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MediaIconButton(
+    label: String,
+    icon: Int,
+    id: String,
+    move: FocusMove?,
+    focused: (String) -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier.size(48.dp),
+    shape: Shape? = null,
+    click: () -> Unit,
+) {
+    FocusSurface(id, move, focused, click, modifier.semantics { contentDescription = label }, enabled = enabled, glassShape = shape) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Image(painterResource(icon), null, Modifier.size(24.dp), colorFilter = ColorFilter.tint(LocalContentColor.current))
+        }
+    }
+}
+
+internal fun clockTime(seconds: Long): String = if (seconds >= 3600) {
     String.format(Locale.ROOT, "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
 } else String.format(Locale.ROOT, "%d:%02d", seconds / 60, seconds % 60)

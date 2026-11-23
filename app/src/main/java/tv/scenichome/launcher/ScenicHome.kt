@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.provider.Settings
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -38,6 +39,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +62,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -105,12 +108,12 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
-internal val ink = Color(0xFF0C201E)
-internal val panel = Color(0xFF142B29)
-internal val mint = Color(0xFFC5EBDD)
-internal val foreground = Color(0xFFF3F8F4)
-internal val secondary = Color(0xFFBBD5CC)
-internal val edge = Color(0xFF42615B)
+internal val ink = Color(0xFF101010)
+internal val panel = Color(0xFF1C1C1C)
+internal val focusColor = Color(0xFFF1F1F1)
+internal val foreground = Color(0xFFF5F5F5)
+internal val secondary = Color(0xFFCBCBCB)
+internal val edge = Color(0xFF585858)
 private val dockShape = RoundedCornerShape(24.dp)
 private val tileShape = RoundedCornerShape(12.dp)
 private val glassTile = RoundedCornerShape(16.dp)
@@ -130,6 +133,7 @@ private data class Setting(
 
 private fun dockKey(app: TvApp) = "home/app/${app.pkg}"
 private fun shelfKey(app: TvApp) = "apps/app/${app.pkg}"
+internal fun heroKey(id: Int) = "home/hero/$id"
 
 @Composable
 internal fun ScenicHome(activity: MainActivity) {
@@ -138,12 +142,14 @@ internal fun ScenicHome(activity: MainActivity) {
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var pairing by rememberSaveable { mutableStateOf(false) }
     var title by remember { mutableStateOf<MediaTitle?>(null) }
+    var startEpisode by remember { mutableStateOf<EpisodeNumber?>(null) }
     val search = remember { MediaSearchState() }
     val heading = title
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(media.accountRevision) { search.clearPersonal() }
     LaunchedEffect(media.watchlist) { media.refreshWallpaper() }
+    LaunchedEffect(media.accountRevision, media.catalogRevision, media.watchlist) { media.refreshUpcoming() }
     LaunchedEffect(activity.foreground) {
         if (!activity.foreground) return@LaunchedEffect
         while (true) {
@@ -160,7 +166,7 @@ internal fun ScenicHome(activity: MainActivity) {
 
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = mint, onPrimary = ink, surface = panel, onSurface = foreground,
+            primary = focusColor, onPrimary = ink, surface = panel, onSurface = foreground,
             background = ink, onBackground = foreground,
         ),
     ) {
@@ -172,13 +178,20 @@ internal fun ScenicHome(activity: MainActivity) {
                         scope.launch { media.refresh() }
                     })
                     heading != null -> stateHolder.SaveableStateProvider("title/${heading.id}") {
-                        MediaTitleScreen(activity, heading, { pairing = true }) { title = null }
+                        MediaTitleScreen(activity, heading, { pairing = true }, startEpisode) {
+                            title = null
+                            startEpisode = null
+                        }
                     }
                     searchOpen -> stateHolder.SaveableStateProvider("search") {
                         MediaSearchScreen(activity, search, { pairing = true }, { title = it }) { searchOpen = false }
                     }
                     else -> stateHolder.SaveableStateProvider("home") {
-                        HomeScreen(activity, { searchOpen = true }, { pairing = true }) { title = it }
+                        HomeScreen(
+                            activity, { searchOpen = true }, { pairing = true },
+                            onTitle = { title = it },
+                            onEpisode = { startEpisode = it.episode; title = it.title },
+                        )
                     }
                 }
                 activity.notice?.let { message ->
@@ -201,6 +214,7 @@ private fun HomeScreen(
     onSearch: () -> Unit,
     onConnect: () -> Unit,
     onTitle: (MediaTitle) -> Unit,
+    onEpisode: (UpcomingEpisode) -> Unit,
 ) {
     val homeGrid = rememberLazyGridState()
     val appGrid = rememberLazyGridState()
@@ -211,6 +225,7 @@ private fun HomeScreen(
     var connectionMenu by remember { mutableStateOf(false) }
     var lastFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var lastDockFocus by rememberSaveable { mutableStateOf<String?>(null) }
+    var heroTitleId by rememberSaveable { mutableIntStateOf(0) }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
     val scope = rememberCoroutineScope()
@@ -228,14 +243,36 @@ private fun HomeScreen(
     ).filter { it.first == "watch" || it.third.isNotEmpty() }
     val scene = activity.scene
     val wallpaper = media.wallpaper
-    val blur = remember(scene, wallpaper) { (wallpaper?.frosted ?: scene?.frosted)?.asImageBitmap() }
+    val upcoming = if (appsOpen) emptyList() else media.upcoming
+    val hero = upcoming.firstOrNull { it.title.id == heroTitleId } ?: upcoming.firstOrNull()
+    val showHero = wallpaper != null || upcoming.isNotEmpty()
+    val hasStage = showHero && !appsOpen
+    val heroCover = hero?.title?.cover
+    val heroBackdrop by produceState<Bitmap?>(null, heroCover) {
+        value = heroCover?.let { url ->
+            wallpaper?.takeIf { it.url == url }?.bitmap
+                ?: media.artwork.image(url, 1920)?.takeIf { it.width >= it.height }
+        }
+    }
+    val backdrop = (if (heroCover != null) heroBackdrop else null) ?: wallpaper?.bitmap ?: scene?.bitmap
+    val canRotate = heroCover == null && wallpaper == null
+    val blur = remember(hasStage, scene, wallpaper) {
+        if (hasStage) null else (wallpaper?.frosted ?: scene?.frosted)?.asImageBitmap()
+    }
     val dialogOpen = appMenu != null || photoDialog != null || connectionMenu
-    val homeTargets = dock.map(::dockKey) + listOf("home/apps", "home/search", "home/play", "home/settings") +
-        listOfNotNull("home/next".takeIf { wallpaper == null }, "home/watch/status".takeIf { !media.connected || media.connectionIssue }) +
+    val dockTargets = dock.map(::dockKey) + "home/apps"
+    val homeTargets = dockTargets + listOf("home/search", "home/play", "home/settings") +
+        listOfNotNull("home/next".takeIf { canRotate }, "home/watch/status".takeIf { !media.connected || media.connectionIssue }) +
+        upcoming.map { heroKey(it.title.id) } +
         scenes.flatMap { (key, _, titles) -> titles.map { "home/$key/${it.id}" } }
     val targets = if (appsOpen) apps.map(::shelfKey) + homeTargets else homeTargets
-    val focusLost = lastFocus != null && lastFocus !in targets && lastFocus?.startsWith("home/watch/") == true
+    val focusLost = lastFocus !in targets &&
+        (lastFocus?.startsWith("home/watch/") == true || lastFocus?.startsWith("home/hero/") == true)
+    val dockIndex = if (hasStage) 1 else 0
 
+    LaunchedEffect(hasStage) {
+        if (hasStage && lastFocus in dockTargets) homeGrid.scrollToItem(0)
+    }
     LaunchedEffect(activity.foreground, activity.appsLoaded, appsOpen, dialogOpen, focusLost) {
         if (!activity.foreground || !activity.appsLoaded || dialogOpen) return@LaunchedEffect
         val target = focusAfterRefresh(lastFocus, targets) ?: return@LaunchedEffect
@@ -243,11 +280,14 @@ private fun HomeScreen(
         val group = target.split('/').getOrNull(1)
         val index = when {
             appsOpen && target.startsWith("apps/") -> apps.indexOfFirst { shelfKey(it) == target } + 2
+            group == "hero" -> 0
             !appsOpen && group in listOf("watch", "new", "suggested") ->
-                1 + scenes.indexOfFirst { it.first == group }
-            else -> 0
+                dockIndex + 1 + scenes.indexOfFirst { it.first == group }
+            else -> dockIndex
         }
-        if (index >= 0 && grid.layoutInfo.visibleItemsInfo.none { it.index == index }) grid.scrollToItem(index)
+        val needsScroll = if (group == "hero") grid.canScrollBackward
+            else index >= 0 && grid.layoutInfo.visibleItemsInfo.none { it.index == index }
+        if (needsScroll) grid.scrollToItem(index)
         move = FocusMove(target, ++sequence)
     }
 
@@ -255,6 +295,7 @@ private fun HomeScreen(
         if (!dialogOpen && activity.appsLoaded) {
             lastFocus = id
             if (id.startsWith("home/app")) lastDockFocus = id
+            if (id.startsWith("home/hero/") && homeGrid.canScrollBackward) homeGrid.requestScrollToItem(0)
         }
     }
     BackHandler(appsOpen && !dialogOpen) {
@@ -270,15 +311,24 @@ private fun HomeScreen(
 
     BoxWithConstraints(Modifier.fillMaxSize().background(ink).onPreviewKeyEvent {
         val key = it.nativeKeyEvent
+        val heroTarget = hero?.let { episode -> heroKey(episode.title.id) }
         val target = when {
             dialogOpen -> null
-            key.keyCode == KeyEvent.KEYCODE_DPAD_UP && lastFocus?.startsWith("home/app") == true -> "home/search"
+            key.keyCode == KeyEvent.KEYCODE_DPAD_UP && lastFocus in dockTargets -> heroTarget ?: "home/search"
+            key.keyCode == KeyEvent.KEYCODE_DPAD_UP && lastFocus?.startsWith("home/hero/") == true -> "home/search"
+            key.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && lastFocus?.startsWith("home/hero/") == true ->
+                focusAfterRefresh(lastDockFocus, dockTargets)
             key.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && lastFocus == "home/search" ->
-                focusAfterRefresh(lastDockFocus, dock.map(::dockKey) + "home/apps")
+                heroTarget ?: focusAfterRefresh(lastDockFocus, dockTargets)
             else -> null
         }
         if (target != null && key.action == KeyEvent.ACTION_DOWN && key.repeatCount == 0) {
-            move = FocusMove(target, ++sequence)
+            if (target.startsWith("home/hero/") && homeGrid.canScrollBackward) {
+                scope.launch {
+                    homeGrid.scrollToItem(0)
+                    move = FocusMove(target, ++sequence)
+                }
+            } else move = FocusMove(target, ++sequence)
         }
         target != null
     }) {
@@ -287,11 +337,29 @@ private fun HomeScreen(
         val vertical = if (compact) 18.dp else 24.dp
         val headerSpace = vertical + 65.dp
         val columns = if (maxWidth >= 940.dp) 6 else 5
+        val gridTopPadding = 8.dp
+        val homeRowSpacing = 20.dp
+        val dockTopPadding = 6.dp
+        val dockHeight = if (compact) 88.dp else 106.dp
+        val spaceOutsideHero = headerSpace + gridTopPadding + homeRowSpacing + dockTopPadding + dockHeight
+        val heroHeight = (maxHeight - spaceOutsideHero - 12.dp).coerceAtLeast(126.dp)
+        val scrollThreshold = with(LocalDensity.current) { 40.dp.roundToPx() }
+        val browsing by remember(grid, scrollThreshold) {
+            derivedStateOf { grid.firstVisibleItemIndex > 0 || grid.firstVisibleItemScrollOffset > scrollThreshold }
+        }
 
-        SceneBackdrop(wallpaper?.bitmap ?: scene?.bitmap)
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
-            0f to Color(0xB110181B), .18f to Color(0xA210181B), .49f to Color(0x4A0C201E), 1f to Color(0xE50C201E),
+        val backdropFrame = if (hasStage) {
+            Modifier.fillMaxWidth().height((spaceOutsideHero + heroHeight).coerceAtMost(maxHeight))
+        } else Modifier.fillMaxSize()
+        SceneBackdrop(backdrop, backdropFrame)
+        if (hero != null) Box(backdropFrame.background(Brush.horizontalGradient(
+            0f to Color(0xAD000000), .36f to Color(0x47000000), .72f to Color.Transparent,
         )))
+        Box(backdropFrame.background(Brush.verticalGradient(
+            0f to Color(0xA0000000), .22f to Color(0x30000000), .45f to Color.Transparent,
+            .66f to Color(0x4F000000), .87f to Color(0xDB101010), 1f to ink,
+        )))
+        if (browsing) Box(Modifier.fillMaxSize().background(Color(0xAE000000)))
         if (appsOpen) {
             AppShelfBackdrop(
                 grid, Modifier.fillMaxSize().padding(top = headerSpace, start = margin - 12.dp, end = margin - 12.dp),
@@ -302,14 +370,26 @@ private fun HomeScreen(
                 columns = GridCells.Fixed(columns),
                 state = grid,
                 modifier = Modifier.fillMaxSize().padding(top = headerSpace),
-                contentPadding = PaddingValues(start = margin, end = margin, top = 8.dp, bottom = 28.dp),
+                contentPadding = PaddingValues(start = margin, end = margin, top = gridTopPadding, bottom = 28.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(if (appsOpen) 14.dp else 20.dp),
+                verticalArrangement = Arrangement.spacedBy(if (appsOpen) 14.dp else homeRowSpacing),
             ) {
+                if (hasStage) item(key = "home/hero", span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth().height(heroHeight), contentAlignment = Alignment.BottomStart) {
+                        if (hero != null) EpisodeHero(
+                            media, upcoming, hero, move,
+                            focused = { episode ->
+                                heroTitleId = episode.title.id
+                                onFocused(heroKey(heroTitleId))
+                            },
+                            play = onEpisode,
+                        )
+                    }
+                }
                 item(key = "home/dock", span = { GridItemSpan(maxLineSpan) }) {
-                    Box(Modifier.fillMaxWidth().padding(top = 6.dp), contentAlignment = Alignment.CenterStart) {
+                    Box(Modifier.fillMaxWidth().padding(top = dockTopPadding), contentAlignment = Alignment.CenterStart) {
                         FavoritesRow(
-                            activity, dock, blur, compact, move, onFocused, Modifier,
+                            activity, dock, blur, compact, dockHeight, move, onFocused, Modifier,
                             onApps = {
                                 lastFocus = apps.firstOrNull()?.let(::shelfKey) ?: "home/apps"
                                 appsOpen = true
@@ -355,7 +435,7 @@ private fun HomeScreen(
                     Text("Search", color = foreground, fontSize = 17.sp)
                 }
             }
-            if (wallpaper == null) {
+            if (canRotate) {
                 HomeAction(
                     "home/next", "Next wallpaper", R.drawable.home_next, move, onFocused, blur,
                     onClick = activity::nextPhoto, onLongClick = { photoDialog = PhotoDialog.OPTIONS },
@@ -407,7 +487,7 @@ private fun AppShelfBackdrop(grid: LazyGridState, modifier: Modifier) {
             ?: if (grid.firstVisibleItemIndex >= 2) -radius else return@Canvas
         if (top < size.height) {
             drawRoundRect(
-                color = Color(0xEC15191E),
+                color = Color(0xEC1C1C1C),
                 topLeft = Offset(0f, top),
                 size = Size(size.width, size.height - top + radius),
                 cornerRadius = CornerRadius(radius),
@@ -417,13 +497,14 @@ private fun AppShelfBackdrop(grid: LazyGridState, modifier: Modifier) {
 }
 
 @Composable
-private fun SceneBackdrop(scene: Bitmap?) {
+private fun SceneBackdrop(scene: Bitmap?, modifier: Modifier) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val motion = remember {
         Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f
     }
     Crossfade(
         targetState = scene,
+        modifier = modifier.clipToBounds(),
         animationSpec = tween(if (motion) 480 else 0),
         label = "scenic photograph",
     ) { image ->
@@ -444,13 +525,13 @@ private fun FavoritesRow(
     dock: List<TvApp>,
     blur: ImageBitmap?,
     compact: Boolean,
+    height: Dp,
     move: FocusMove?,
     onFocused: (String) -> Unit,
     modifier: Modifier,
     onApps: () -> Unit,
     onMenu: (TvApp) -> Unit,
 ) {
-    val height = if (compact) 88.dp else 106.dp
     Row(
         modifier.widthIn(max = 820.dp).fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
@@ -512,7 +593,7 @@ private fun Clock(modifier: Modifier = Modifier) {
     }
     val timeFormat = remember { DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT) }
     val dateFormat = remember { DateTimeFormatter.ofPattern("EEEE, d MMMM") }
-    val style = LocalTextStyle.current.copy(shadow = Shadow(Color(0xAA050B11), Offset(0f, 2f), 8f))
+    val style = LocalTextStyle.current.copy(shadow = Shadow(Color(0xAA000000), Offset(0f, 2f), 8f))
     Column(modifier) {
         Text(
             now.format(timeFormat), color = foreground, fontSize = 36.sp, lineHeight = 40.sp,
@@ -543,7 +624,7 @@ private fun AppTile(
         modifier.fillMaxWidth().height(height), onLongClick = onLong,
         glassShape = if (flat) null else glassTile,
         blur = blur,
-        fill = if (flat) Color(0xFF292F35) else null,
+        fill = if (flat) Color(0xFF2B2B2B) else null,
     ) {
         TileCaption(app.label) {
             if (bitmap != null) {
@@ -577,9 +658,18 @@ internal fun Action(
     onFocused: (String) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    @DrawableRes icon: Int? = null,
 ) {
     FocusSurface(id, move, onFocused, onClick, modifier.height(48.dp), enabled = enabled) {
-        Box(Modifier.fillMaxHeight().padding(horizontal = 15.dp), contentAlignment = Alignment.CenterStart) {
+        Row(
+            Modifier.fillMaxHeight().padding(horizontal = 15.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            icon?.let {
+                Image(painterResource(it), null, Modifier.size(20.dp),
+                    colorFilter = ColorFilter.tint(LocalContentColor.current))
+            }
             Text(title, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
@@ -601,7 +691,8 @@ internal fun FocusSurface(
 ) {
     val requester = remember { FocusRequester() }
     val shape = glassShape ?: tileShape
-    val focusedFill = if (fill != null) Color(0xFFE1E8EF) else mint
+    val contentShowsFocus = fill == Color.Transparent
+    val transparentFocus = glassShape != null || contentShowsFocus
     LaunchedEffect(move, enabled) {
         if (move?.id == id && enabled) {
             withFrameNanos { }
@@ -617,23 +708,31 @@ internal fun FocusSurface(
         },
         shape = ClickableSurfaceDefaults.shape(shape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (glassShape != null) Color.Transparent else fill ?: Color(0xFF213D38),
+            containerColor = if (glassShape != null) Color.Transparent else fill ?: Color(0xFF303030),
             contentColor = foreground,
-            focusedContainerColor = if (glassShape != null) Color.Transparent else focusedFill,
-            focusedContentColor = if (glassShape != null) foreground else ink,
-            pressedContainerColor = if (glassShape != null) Color(0x35EAF6FF) else focusedFill,
-            pressedContentColor = if (glassShape != null) foreground else ink,
+            focusedContainerColor = if (transparentFocus) Color.Transparent else focusColor,
+            focusedContentColor = if (transparentFocus) foreground else ink,
+            pressedContainerColor = when {
+                contentShowsFocus -> Color.Transparent
+                glassShape != null -> Color(0x35FFFFFF)
+                else -> focusColor
+            },
+            pressedContentColor = if (transparentFocus) foreground else ink,
             disabledContainerColor = panel, disabledContentColor = secondary,
         ),
         border = ClickableSurfaceDefaults.border(
             border = if (glassShape != null) {
                 Border(BorderStroke(.75.dp, Color(0x38FFFFFF)), shape = shape)
             } else Border.None,
-            focusedBorder = Border(
-                BorderStroke(if (glassShape != null) 1.5.dp else 2.dp, Color(0xFFF1FFF9)), shape = shape,
+            focusedBorder = if (contentShowsFocus) Border.None else Border(
+                BorderStroke(if (glassShape != null) 1.5.dp else 2.dp, Color.White), shape = shape,
             ),
         ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = if (glassShape != null) 1.045f else 1.025f),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = when {
+            contentShowsFocus -> 1f
+            glassShape != null -> 1.045f
+            else -> 1.025f
+        }),
     ) {
         if (glassShape != null) {
             FrostedGlass(blur, shape, Modifier.matchParentSize())
@@ -662,7 +761,7 @@ private fun FrostedGlass(photo: ImageBitmap?, shape: Shape, modifier: Modifier) 
                     drawRect(Color.Black.copy(alpha = tint))
                 }
             } else {
-                Spacer(Modifier.fillMaxSize().background(Color(0xAB131B24)))
+                Spacer(Modifier.fillMaxSize().background(Color(0xAB161616)))
             }
         }
     }

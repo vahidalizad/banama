@@ -52,7 +52,7 @@ Each name maps to `/action/{name}` under the API base. A dash means an empty for
 | `user_mylist` | — | Membership for `watchlist`, `favorite`, `notify`, and `downloadlist`. TV checks `result.watchlist.post` for membership by title ID. |
 | `user_list` | `action=list`, `group=watchlist`, `page=1`, `orderby=add_list`, `order=DESC` | `result.posts` and pagination. Hybrid uses these fields for its library tab. |
 | `user_list` | `action=add`, `group`, `post_id` | SDK exposes this as a toggle. The declared response is `result.action` (`add` or `remove`) and `result.group`. Read back on ambiguous failure to avoid a second toggle. |
-| `continue_watching` | — | `result.posts` for the resume row. |
+| `continue_watching` | — | `result.posts[].data` carries the season, episode, and time in seconds. The saved time can be zero. The per-title stream response can also carry a resume entry for titles absent from this row. |
 | `continue_watching_dismiss` | `id` | Dismisses the resume entry using the selected post ID. |
 | `observer` | `post_id`, `file_id`, `user_id`, `time`, `duration`, `token` | Playback progress. `time` and `duration` are seconds. This token comes from the playback response, separate from `c-token`. The player reports at approximately 30-second boundaries. |
 | `notification`, `notification_read` | `page` (default 1), `notification_id` respectively | Notification list and marking a notification read. The SDK accepts `all` for marking all read. |
@@ -65,16 +65,18 @@ Use `posts[].id` as `post_id` throughout. The title model includes `post_type`, 
 
 | Action | Form fields | Fields consumed by the client |
 | --- | --- | --- |
-| `stream` | `post_id`, optional `free_stream` when the title exposes the free flow | `result.hls[]` contains playable entries. Each exposes `info.file_id`, `file.m3u8`, `file.subtitle`, and `options.token`. `result.continue_watching` carries the saved file and time. The player uses the per-entry metadata to select episodes and subtitles. |
+| `stream` | `post_id`, optional `free_stream` when the title exposes the free flow | `result.hls[]` contains `info.file_id`, `file.m3u8`, `file.subtitle`, and `options.token`. `result.continue_watching` carries the saved file and time. Optional `options.intro_start`, `options.intro_end`, and `options.end` mark the intro and the start of credits on that stream. The TV client reads them as `HH:MM:SS`. |
 | `download` | `post_id`, `free_download` derived from the site's free flag | Hybrid reads `result.download`. Movies use an array of release rows with `dl`; series can use a map of season groups with `link[]` entries containing `episode` and `dl`. Rows can carry `quality`, `resolution`, `encoder`, `size`, `tags`, `mediainfo`, and subtitle information. Hybrid checks `user_allowed_to_download` on the normal paid route. |
 
 Read `options.free_stream` and `options.free_download` from title details when choosing the playback or download mode. Keep temporary media URLs out of diagnostic logs and resolve them again when playback access expires. The SDK declares `file.m3u8` as an array of objects with `default`, `2ch`, `6ch`, and `label` fields. The TV code selects a URL using the preferred audio channel. [Hybrid player code](https://hybrid.30app.store/_nuxt/Df-Cu19X.js) · [Hybrid downloads code](https://hybrid.30app.store/_nuxt/BQqBFT7X.js) · [SDK response declarations](https://www.npmjs.com/package/30nama-sdk/v/0.14.3)
 
-### 4K-only playback
+On the TCL, the native API returned 720p and 1080p download releases for both seasons of *The Gentlemen* (`630434`). The sampled HLS master also topped out at 1080p. The website trace used a separate v1 download API at `interface.30nama.com`. That route returned HTML in the native client probe without a website session, so Scenic Home continues to use the verified Android TV API. Two UHD Matroska releases from the TV API returned `206 Partial Content` at byte 0 and at a 1 MiB offset.
 
-1. Try official HLS first. A TV title already advertised 2160p in the player. Read the master playlist track formats with Media3, then select a compatible 2160-line rendition. Use codec and reported dimensions together, since a cropped 4K file can be 3840 pixels wide with fewer than 2160 active lines. Keep the selection within the eligible tracks so adaptive playback cannot silently select HD. If the title, device, or connection cannot play 4K, surface that state and offer to open the official title.
+### 4K-first playback
+
+1. Try the highest-bitrate compatible 4K HLS track first. If a seekable 4K download is unavailable, start the highest compatible streaming resolution automatically. A cropped 4K file can be 3840 pixels wide with fewer than 2160 active lines.
 2. For an entitled 4K download, select an actual file using resolution and media information. Probe the fresh HTTPS URL with a small ranged `GET` such as `Range: bytes=0-65535`. Check for `206 Partial Content` and a matching `Content-Range`. A `200` on that GET means the server ignored the range, so close the probe promptly. Check a nonzero offset and seek behavior before relying on the URL for progressive playback.
-3. Let Media3 buffer the progressive file during playback and seek with range requests. Check that the container exposes its index early enough for fast startup or allows retrieval by range, and test the file's video, audio, HDR, subtitles, startup time, and seeking on the TCL. Measure HLS and progressive playback with the same title before adding an on-disk cache or extra download workers. The real download URL's range behavior, expiry, and direct playback compatibility are unverified.
+3. Rank seekable 4K releases by the total bytes reported in `Content-Range`, largest first. List the result as **4K Download** alongside supported stream qualities. Media3 buffers as it plays and seeks with byte ranges. Keep the playback position and pause state when switching sources. Chapter times are specific to the streaming file.
 
 References for the player and HTTP checks. [Media3 HLS](https://developer.android.com/media/media3/exoplayer/hls) · [Media3 progressive media](https://developer.android.com/media/media3/exoplayer/progressive) · [Media3 track selection](https://developer.android.com/media/media3/exoplayer/track-selection) · [HTTP range requests](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests)
 
@@ -82,6 +84,7 @@ References for the player and HTTP checks. [Media3 HLS](https://developer.androi
 
 1. Request a pairing link through the native Android client and display it as a TV QR code. Show a clear setup or retry state when native sign-in is unavailable. The signed-in TV browser served `/#/single/7583` for details, `/#/stream/7583` for playback, and `/#/myLists` for My Lists.
 2. Use one launcher search input with 30nama title results and an **Open in YouTube** action for the query. For a title trailer, pass the title and year to the YouTube search action. Use YouTube's official Data API `search.list` with `part=snippet`, `type=video`, and `q` only if inline YouTube results become a requirement. Leave the launcher’s existing installed-app grid available. [YouTube Data API](https://developers.google.com/youtube/data/reference/rest/v3/search/list)
-3. Add the watchlist as a launcher row and load details only when a title receives focus or is selected. Debounce search, discard stale results, and fetch additional pages as needed. Clear user-specific rows on account changes. Wire playback progress after the 4K paths work on the TV.
+3. Use the watchlist as a launcher row and fetch title details on selection. Debounce search, discard stale results, and clear account-specific state on disconnect.
+4. Use the stream episode list and saved season and episode to select the next playable episode for each watched series on the Watchlist. Report HLS playback with `observer`. Keep resume positions for direct-download playback on the TV, since those releases don't supply an observer token.
 
-Session expiry, watchlist writes, downloads, and TCL playback remain open.
+The native player reached `3840 × 2080` on the TCL with *Clashing Through the Snow*. Session expiry, watchlist writes, and seeking across release formats remain open.

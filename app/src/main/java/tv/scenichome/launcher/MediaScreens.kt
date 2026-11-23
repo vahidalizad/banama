@@ -6,12 +6,16 @@ import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -33,6 +37,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -57,14 +62,22 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,6 +91,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 private val mediaShape = RoundedCornerShape(14.dp)
 internal const val GOLD_EXPIRED = "No 30nama Gold days remaining"
@@ -89,6 +103,7 @@ private fun CatalogImage(
     modifier: Modifier,
     size: Int,
     scale: ContentScale = ContentScale.Crop,
+    placeholder: @Composable () -> Unit = {},
 ) {
     val bitmap by produceState<Bitmap?>(null, url, size) {
         value = null
@@ -96,7 +111,61 @@ private fun CatalogImage(
     }
     val image = bitmap
     if (image != null) Image(remember(image) { image.asImageBitmap() }, null, modifier, contentScale = scale)
-    else Box(modifier.background(panel))
+    else Box(modifier.background(panel), contentAlignment = Alignment.Center) { placeholder() }
+}
+
+@Composable
+internal fun EpisodeHero(
+    media: MediaStore,
+    episodes: List<UpcomingEpisode>,
+    selected: UpcomingEpisode,
+    move: FocusMove?,
+    focused: (UpcomingEpisode) -> Unit,
+    play: (UpcomingEpisode) -> Unit,
+) {
+    val row = rememberLazyListState()
+    LaunchedEffect(move) {
+        val index = episodes.indexOfFirst { heroKey(it.title.id) == move?.id }
+        if (index >= 0 && row.layoutInfo.visibleItemsInfo.none { it.index == index }) row.scrollToItem(index)
+    }
+    Column(
+        Modifier.widthIn(max = 696.dp).fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(selected.title.name, fontSize = 23.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(selected.episode.label(), color = foreground, fontSize = 14.sp)
+        LazyRow(
+            state = row, modifier = Modifier.fillMaxWidth().padding(top = 4.dp).focusGroup(),
+            contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(episodes, key = { it.title.id }) { episode ->
+                val active = selected.title.id == episode.title.id
+                var hasFocus by remember { mutableStateOf(false) }
+                val label = "Play ${episode.title.name} · ${episode.episode.label()}"
+                val selectedBorder = if (active && !hasFocus) Modifier.border(1.dp, Color(0xBFFFFFFF), RoundedCornerShape(12.dp))
+                    else Modifier
+                FocusSurface(
+                    heroKey(episode.title.id), move, { focused(episode) }, { play(episode) },
+                    Modifier.size(106.dp, 60.dp).then(selectedBorder).onFocusChanged { hasFocus = it.isFocused }
+                        .semantics { contentDescription = label },
+                    fill = panel,
+                ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CatalogImage(media, episode.title.cover ?: episode.title.poster, Modifier.matchParentSize(), 260)
+                        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = if (active) .17f else .32f)))
+                        if (active) Box(
+                            Modifier.size(32.dp).background(Color.Black.copy(alpha = .72f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Image(painterResource(R.drawable.media_play), null, Modifier.size(20.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -109,12 +178,21 @@ private fun TitleCard(
     open: (MediaTitle) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    FocusSurface(id, move, focused, { open(title) }, modifier, fill = panel) {
-        Column(Modifier.fillMaxWidth().clip(mediaShape)) {
-            CatalogImage(media, title.cover ?: title.poster, Modifier.fillMaxWidth().height(91.dp), 420)
+    var hasFocus by remember(title.id) { mutableStateOf(false) }
+    FocusSurface(id, move, focused, { open(title) },
+        modifier.onFocusChanged { hasFocus = it.isFocused }, fill = panel) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+            CatalogImage(media, title.cover ?: title.poster, Modifier.matchParentSize(), 420)
+            Box(Modifier.matchParentSize().background(Brush.verticalGradient(
+                0f to Color(0x3D202020), .55f to Color(0x52202020), .83f to Color(0xB8000000),
+                1f to Color(0xD6000000),
+            )))
             Text(
-                title.name, modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
-                fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                title.name,
+                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp)
+                    .then(if (hasFocus) Modifier.basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 650) else Modifier),
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false, overflow = if (hasFocus) TextOverflow.Clip else TextOverflow.Ellipsis,
                 style = TextStyle(textDirection = TextDirection.Content),
             )
         }
@@ -269,6 +347,15 @@ internal fun MediaSearchScreen(
     val request = state.lookupKey(media.listRevision)
     val searchable = media.configured && (!state.personal() || media.connected)
 
+    fun leaveSearchInput() {
+        keyboard?.hide()
+        val result = state.titles.firstOrNull()?.takeIf { state.query.isNotBlank() && state.matches(request) }
+        val id = if (result != null) "search/title/${result.id}" else {
+            "search/scope/${SearchScope.entries.first { it.label == state.scope() }.name}"
+        }
+        move = FocusMove(id, (move?.revision ?: 0) + 1)
+    }
+
     LaunchedEffect(media.connected) { if (!media.connected) state.clearPersonal() }
     LaunchedEffect(request, searchable, retry) {
         if (!searchable || (retry == 0 && state.matches(request))) return@LaunchedEffect
@@ -304,23 +391,30 @@ internal fun MediaSearchScreen(
                     onValueChange = { state.query = it },
                     singleLine = true,
                     textStyle = TextStyle(color = foreground, fontSize = 20.sp, textDirection = TextDirection.Content),
-                    cursorBrush = SolidColor(mint),
+                    cursorBrush = SolidColor(focusColor),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
+                    keyboardActions = KeyboardActions(onSearch = { leaveSearchInput() }),
                     modifier = Modifier.weight(1f).focusRequester(field).onFocusChanged {
                         fieldFocused = it.isFocused
                         if (it.isFocused) focused = "search/input"
                     }.onPreviewKeyEvent {
                         val event = it.nativeKeyEvent
-                        if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
-                            if (event.action == KeyEvent.ACTION_UP) keyboard?.show()
-                            true
-                        } else false
+                        when (event.keyCode) {
+                            KeyEvent.KEYCODE_DPAD_CENTER -> {
+                                if (event.action == KeyEvent.ACTION_UP) keyboard?.show()
+                                true
+                            }
+                            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) leaveSearchInput()
+                                true
+                            }
+                            else -> false
+                        }
                     },
                     decorationBox = { edit ->
                         Box(
                             Modifier.fillMaxWidth().height(48.dp).background(panel, mediaShape)
-                                .border(if (fieldFocused) 2.dp else 1.dp, if (fieldFocused) mint else edge, mediaShape)
+                                .border(if (fieldFocused) 2.dp else 1.dp, if (fieldFocused) focusColor else edge, mediaShape)
                                 .padding(horizontal = 15.dp), contentAlignment = Alignment.CenterStart,
                         ) {
                             if (state.query.isEmpty()) Text("Title or IMDb ID", color = secondary, fontSize = 19.sp)
@@ -424,7 +518,7 @@ internal fun MediaSearchScreen(
 
 @Composable
 private fun Choice(label: String, chosen: Boolean, id: String, move: FocusMove?, focused: (String) -> Unit, click: () -> Unit) {
-    val accent = if (chosen) mint else Color.Transparent
+    val accent = if (chosen) focusColor else Color.Transparent
     Action(label, click, id, move, focused, Modifier.border(1.dp, accent, RoundedCornerShape(12.dp)))
 }
 
@@ -522,42 +616,147 @@ internal fun MediaDialog(
     }
 }
 
-private fun MediaEpisode.label(series: Boolean): String {
-    if (!series) return name.ifBlank { "Movie" }
-    val part = if (number > 0) "Episode $number" else "Special"
-    return if (name.isBlank()) part else "$part · $name"
-}
+private fun MediaEpisode.pickerName(): String = name.trim().takeUnless {
+    it.equals("Season $season - Episode $number", ignoreCase = true) || it.equals("Episode $number", ignoreCase = true)
+}.orEmpty()
+
+private fun EpisodeNumber.label() = if (season > 0 && episode > 0) "Season $season · Episode $episode"
+    else if (episode > 0) "Special · Episode $episode" else "Special"
+
+private fun WatchPosition.label(series: Boolean) = listOfNotNull(
+    "Last played", episode.label().takeIf { series }, clockTime(timeMs / 1000),
+).joinToString(" · ")
 
 @Composable
 internal fun EpisodePicker(
     episodes: List<MediaEpisode>,
     selected: MediaEpisode?,
+    lastPlayed: WatchPosition?,
     onClose: () -> Unit,
     onSelect: (MediaEpisode) -> Unit,
 ) {
-    val groups = episodes.groupBy(MediaEpisode::season).toSortedMap()
-    val seasons = groups.keys.toList()
-    var season by remember { mutableStateOf(selected?.season?.takeIf { it in groups }) }
-    val current = if (seasons.size == 1) seasons.first() else season
-    val choices = groups[current]?.sortedBy(MediaEpisode::number).orEmpty()
-    if (current == null) {
-        MediaDialog("Seasons", null, seasons.map { if (it == 0) "Specials" else "Season $it" },
-            close = onClose) { season = seasons[it] }
-    } else {
-        val offset = if (seasons.size > 1) 1 else 0
-        val actions = (if (offset == 1) listOf("Choose season") else emptyList()) + choices.map { it.label(true) }
-        val initial = choices.indexOf(selected).coerceAtLeast(0) + offset
-        androidx.compose.runtime.key(current) {
-            MediaDialog(if (current == 0) "Specials" else "Season $current", null, actions, initial,
-                close = onClose) { index ->
-                if (index < offset) season = null else onSelect(choices[index - offset])
+    if (episodes.isEmpty()) return
+    val entries = remember(episodes) {
+        episodes.groupBy(MediaEpisode::season).toSortedMap().flatMap { (season, items) ->
+            listOf(season to null) + items.sortedBy(MediaEpisode::number).map { season to it }
+        }
+    }
+    val initial = entries.indexOfFirst { (_, episode) ->
+        episode != null && if (selected != null) episode == selected else episode.key == lastPlayed?.episode
+    }.takeIf { it >= 0 } ?: 1
+    var focused by remember(entries, initial) { mutableStateOf(entries[initial].second) }
+    var focusOnOpen by remember(entries, initial) { mutableStateOf(true) }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BoxWithConstraints(
+            Modifier.widthIn(max = 1040.dp).fillMaxWidth(.9f).heightIn(max = 590.dp).fillMaxHeight(.86f)
+                .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(horizontal = 24.dp, vertical = 18.dp),
+        ) {
+            val columns = (maxWidth / 111.dp).toInt().coerceIn(3, 8)
+            val header = entries.indexOfLast { it.second == null && it.first == entries[initial].first }
+            val grid = rememberLazyGridState(if (initial - header <= columns * 3) header else initial)
+            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Episodes", fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
+                lastPlayed?.let { Text(it.label(true), color = foreground, fontSize = 16.sp) }
+                Text(
+                    focused?.let {
+                        val number = if (it.number > 0) "Episode ${it.number}" else "Special"
+                        val season = if (it.season > 0) "Season ${it.season}" else "Specials"
+                        listOf(season, number, it.pickerName()).filter(String::isNotBlank).joinToString(" · ")
+                    }.orEmpty(),
+                    color = secondary, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns), state = grid, modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 5.dp),
+                ) {
+                    items(entries.size, key = { it }, span = { index ->
+                        GridItemSpan(if (entries[index].second == null) maxLineSpan else 1)
+                    }) { index ->
+                        val (season, episode) = entries[index]
+                        if (episode == null) {
+                            Text(
+                                if (season == 0) "Specials" else "Season $season",
+                                modifier = Modifier.padding(top = 7.dp, bottom = 1.dp),
+                                fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                            )
+                        } else {
+                            val shape = RoundedCornerShape(12.dp)
+                            val watched = lastPlayed?.takeIf { it.episode == episode.key }
+                            val current = if (episode == selected || watched != null) {
+                                Modifier.border(1.dp, focusColor, shape)
+                            } else Modifier
+                            val move = if (focusOnOpen) FocusMove("episode/$initial", 0) else null
+                            val name = watched?.let { "Resume ${clockTime(it.timeMs / 1000)}" } ?: episode.pickerName()
+                            FocusSurface("episode/$index", move, {
+                                focused = episode
+                                if (index == initial) focusOnOpen = false
+                            },
+                                { onSelect(episode) }, current.height(58.dp)) {
+                                Column(Modifier.fillMaxSize().padding(horizontal = 9.dp),
+                                    verticalArrangement = Arrangement.Center) {
+                                    Text(
+                                        if (episode.number > 0) "Episode ${episode.number}" else "Special",
+                                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                    )
+                                    if (name.isNotBlank()) Text(
+                                        name, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-internal fun MediaTitleScreen(activity: MainActivity, original: MediaTitle, onConnect: () -> Unit, onClose: () -> Unit) {
+@OptIn(ExperimentalLayoutApi::class)
+private fun TitleRatings(ratings: List<MediaRating>) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for (rating in ratings) {
+            val icon = when (rating.source) {
+                RatingSource.IMDB -> R.drawable.score_imdb
+                RatingSource.NAMA -> R.drawable.score_nama
+                RatingSource.ROTTEN_TOMATOES -> R.drawable.score_rotten_tomatoes
+                RatingSource.METACRITIC -> R.drawable.score_metacritic
+                RatingSource.MY_DRAMA_LIST -> R.drawable.score_mydramalist
+                RatingSource.MY_ANIME_LIST -> R.drawable.score_myanimelist
+            }
+            val votes = rating.votes.takeIf { rating.source == RatingSource.IMDB && it > 0 }
+            val compactVotes = votes?.let {
+                if (it < 1000) it.toString() else String.format(Locale.ROOT, "%.1fK", it / 1000.0)
+            }
+            Row(
+                Modifier.clearAndSetSemantics {
+                    contentDescription = "${rating.source.label} ${rating.score}" +
+                        (votes?.let { ", ${String.format(Locale.getDefault(), "%,d", it)} votes" } ?: "")
+                },
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Image(painterResource(icon), null, Modifier.size(21.dp).clip(CircleShape))
+                Text(rating.score, color = foreground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                compactVotes?.let { Text("($it)", color = secondary, fontSize = 12.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+internal fun MediaTitleScreen(
+    activity: MainActivity,
+    original: MediaTitle,
+    onConnect: () -> Unit,
+    startEpisode: EpisodeNumber?,
+    onClose: () -> Unit,
+) {
     val media = activity.media
     val scope = rememberCoroutineScope()
     var title by remember(original.id) { mutableStateOf(original) }
@@ -567,97 +766,203 @@ internal fun MediaTitleScreen(activity: MainActivity, original: MediaTitle, onCo
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var actionFocus by remember { mutableStateOf(FocusMove("title/play", 0)) }
+    var focusedAction by remember { mutableStateOf("title/play") }
+    val detailScroll = rememberScrollState()
+    val scrollStep = with(LocalDensity.current) { 80.dp.roundToPx() }
 
-    LaunchedEffect(original.id) { tryNama { media.detail(original) }.getOrNull()?.let { title = it } }
+    suspend fun startPlayback(requested: EpisodeNumber? = null) {
+        busy = true
+        notice = null
+        val data = tryNama { media.playback(title) }.getOrNull()
+        val requestedEpisode = requested?.let { key -> data?.episodes?.firstOrNull { it.key == key } }
+        if (data == null || data.episodes.isEmpty() || (requested != null && requestedEpisode == null)) {
+            notice = if (media.account?.days?.let { it <= 0 } == true) GOLD_EXPIRED
+                else "No playable source is available right now."
+            actionFocus = FocusMove("title/play", actionFocus.revision + 1)
+        } else {
+            catalog = data
+            if (title.series && requested == null) picking = true
+            else playing = requestedEpisode ?: data.episodes.first()
+        }
+        busy = false
+    }
+
+    LaunchedEffect(original.id) {
+        tryNama { media.detail(original) }.getOrNull()?.let { title = it }
+        if (startEpisode != null) startPlayback(startEpisode)
+        else tryNama { media.refreshTitlePosition(title) }
+    }
     val video = catalog
     val episode = playing
     if (video != null && episode != null) {
         MediaPlayerScreen(activity, title, video, episode, onEpisode = { playing = it }, onClose = {
-            playing = null
-            actionFocus = FocusMove("title/play", actionFocus.revision + 1)
+            if (startEpisode != null) onClose() else {
+                playing = null
+                actionFocus = FocusMove("title/play", actionFocus.revision + 1)
+            }
         })
         return
     }
 
     BackHandler(onBack = onClose)
-    Box(Modifier.fillMaxSize().background(ink)) {
+    val lastPlayed = media.lastPlayed(title.id)
+    BoxWithConstraints(Modifier.fillMaxSize().background(ink).onPreviewKeyEvent {
+        val event = it.nativeKeyEvent
+        if (focusedAction != "title/play" || event.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
+        val delta = when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_DOWN -> scrollStep
+            KeyEvent.KEYCODE_DPAD_UP -> -scrollStep
+            else -> return@onPreviewKeyEvent false
+        }
+        val target = (detailScroll.value + delta).coerceIn(0, detailScroll.maxValue)
+        if (target == detailScroll.value) return@onPreviewKeyEvent false
+        scope.launch { detailScroll.animateScrollTo(target) }
+        true
+    }) {
+        val margin = (maxWidth * .045f).coerceIn(24.dp, 64.dp)
         title.cover?.let { CatalogImage(media, it, Modifier.fillMaxSize(), 1600) }
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(
-            0f to Color(0xFF0C201E), .62f to Color(0xF00C201E), 1f to Color(0x520C201E),
+            0f to Color(0x17000000), .36f to Color(0x20000000), .56f to Color(0xCC000000),
+            .79f to Color(0xEA000000), 1f to Color(0xF5000000),
         )))
-        Row(
-            Modifier.fillMaxSize().padding(horizontal = 42.dp, vertical = 32.dp),
-            horizontalArrangement = Arrangement.spacedBy(25.dp), verticalAlignment = Alignment.CenterVertically,
+        if (title.cover == null && title.poster != null) {
+            CatalogImage(
+                media, title.poster, Modifier.align(Alignment.CenterStart).padding(start = margin + 78.dp)
+                    .size(142.dp, 213.dp).clip(mediaShape), 480,
+            )
+        }
+        FocusSurface(
+            "title/play", actionFocus, { focusedAction = it },
+            {
+                if (!media.configured || (!media.connected && !title.freeStream && !title.freeDownload)) onConnect()
+                else scope.launch { startPlayback() }
+            },
+            Modifier.align(Alignment.Center).size(76.dp).semantics { contentDescription = "Play" },
+            enabled = !busy, glassShape = CircleShape,
         ) {
-            if (title.poster != null) CatalogImage(media, title.poster, Modifier.width(152.dp).height(228.dp).clip(mediaShape), 480)
-            Column(
-                Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
-            ) {
-                Text(title.name, fontSize = 34.sp, fontWeight = FontWeight.SemiBold,
-                    style = TextStyle(textDirection = TextDirection.Content))
-                if (title.localized.isNotBlank()) Text(title.localized, fontSize = 19.sp, color = secondary)
-                val facts = buildList {
-                    if (title.year > 0) add(title.year.toString())
-                    if (title.runtime > 0) add("${title.runtime} min")
-                    if (title.series && title.seasons > 0) add("${title.seasons} seasons")
-                    addAll(title.genres)
-                }
-                if (facts.isNotEmpty()) Text(facts.joinToString(" · "), color = secondary, fontSize = 17.sp)
-                if (title.ratings.isNotEmpty()) Text(title.ratings.joinToString("   ·   "), color = Color(0xFFFFDCA6), fontSize = 16.sp)
-                if (title.series && title.nextEpisode.isNotBlank()) Text(title.nextEpisode, color = secondary, fontSize = 16.sp)
-                Row(Modifier.padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Action("Play", {
-                        when {
-                            !media.configured -> onConnect()
-                            !media.connected && !title.freeStream && !title.freeDownload -> onConnect()
-                            else -> scope.launch {
-                                actionFocus = FocusMove("title/play", actionFocus.revision + 1)
-                                busy = true
-                                notice = null
-                                val data = tryNama { media.playback(title) }.getOrNull()
-                                if (data == null || data.episodes.isEmpty()) {
-                                    notice = if (media.account?.days?.let { it <= 0 } == true) GOLD_EXPIRED
-                                        else "No playable source is available right now."
-                                } else {
-                                    catalog = data
-                                    if (title.series) picking = true else playing = data.episodes.first()
-                                }
-                                busy = false
-                            }
-                        }
-                    }, "title/play", actionFocus, {}, enabled = !busy)
-                    for ((group, labels) in listOf("favorite" to ("Like" to "Remove like"),
-                        "watchlist" to ("Add to Watchlist" to "Remove from Watchlist"))) {
-                        val name = if (media.has(group, title.id)) labels.second else labels.first
-                        Action(name, {
-                            if (!media.connected || !media.configured) onConnect() else scope.launch {
-                                if (!media.knows(group)) {
-                                    notice = "Your lists are still unavailable. Try again in a moment."
-                                    media.refresh()
-                                    return@launch
-                                }
-                                busy = true
-                                notice = null
-                                if (!media.toggle(group, title.id)) notice = "Couldn’t confirm the change. Check your list and try again."
-                                busy = false
-                                actionFocus = FocusMove("title/$group", actionFocus.revision + 1)
-                            }
-                        }, "title/$group", actionFocus, {}, enabled = !busy)
-                    }
-                }
-                if (busy) Text("Contacting 30nama…", color = secondary, fontSize = 16.sp)
-                notice?.let { Text(it, color = Color(0xFFFFDCA6), fontSize = 17.sp) }
-                if (title.description.isNotBlank()) {
-                    Text(Html.fromHtml(title.description, Html.FROM_HTML_MODE_LEGACY).toString().trim(),
-                        fontSize = 18.sp, lineHeight = 26.sp, style = TextStyle(textDirection = TextDirection.Content))
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(57.dp).border(2.dp, foreground, CircleShape), contentAlignment = Alignment.Center) {
+                    Image(painterResource(R.drawable.media_play), null, Modifier.size(38.dp),
+                        colorFilter = ColorFilter.tint(Color(0xFFFA605B)))
                 }
             }
+        }
+        Column(
+            Modifier.align(Alignment.CenterStart).padding(start = margin)
+                .background(Color(0xAA1C1C1C), mediaShape).padding(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            val lists = listOf(
+                Triple("favorite", "Like" to "Remove like", R.drawable.media_like to R.drawable.media_liked),
+                Triple("watchlist", "Add to Watchlist" to "Remove from Watchlist",
+                    R.drawable.media_watchlist to R.drawable.media_watchlisted),
+                Triple("notify", "Notify me" to "Turn off notifications", R.drawable.media_notify to R.drawable.media_notified),
+            )
+            for ((group, labels, icons) in lists) {
+                val saved = media.has(group, title.id)
+                MediaIconButton(
+                    if (saved) labels.second else labels.first, if (saved) icons.second else icons.first,
+                    "title/$group", actionFocus, { focusedAction = it }, enabled = !busy,
+                ) {
+                    if (!media.connected || !media.configured) onConnect() else scope.launch {
+                        if (!media.knows(group)) {
+                            notice = "Your lists are still unavailable. Try again in a moment."
+                            media.refresh()
+                            return@launch
+                        }
+                        busy = true
+                        notice = null
+                        if (!media.toggle(group, title.id)) notice = "Couldn’t confirm the change. Try again."
+                        busy = false
+                        actionFocus = FocusMove("title/$group", actionFocus.revision + 1)
+                    }
+                }
+            }
+        }
+        val width = (maxWidth * .39f).coerceAtMost(480.dp)
+        Column(
+            Modifier.align(Alignment.CenterEnd).padding(end = margin)
+                .width(width).heightIn(max = maxHeight - 56.dp).verticalScroll(detailScroll),
+            verticalArrangement = Arrangement.spacedBy(13.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(
+                    title.name, Modifier.semantics { heading() },
+                    fontSize = 27.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold,
+                    style = TextStyle(lineBreak = LineBreak.Heading, textDirection = TextDirection.Content),
+                )
+                if (title.localized.isNotBlank()) {
+                    Text(title.localized, fontSize = 15.sp, lineHeight = 20.sp, color = secondary,
+                        style = TextStyle(textDirection = TextDirection.Content))
+                }
+                val year = title.year.toString()
+                val facts = buildList {
+                    if (title.year > 0 && title.name != year && !title.name.endsWith(" $year")) add(year)
+                    if (title.runtime > 0) add("${title.runtime} min")
+                    if (title.series && title.seasons > 0) {
+                        add(if (title.seasons == 1) "1 season" else "${title.seasons} seasons")
+                    }
+                    addAll(title.countries)
+                }
+                if (title.ageRating.isNotBlank() || facts.isNotEmpty()) FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (title.ageRating.isNotBlank()) Text(
+                        title.ageRating,
+                        Modifier.border(1.dp, edge, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
+                        color = foreground, fontSize = 12.sp, lineHeight = 17.sp,
+                    )
+                    for (fact in facts) Text(fact, color = secondary, fontSize = 13.sp, lineHeight = 18.sp)
+                }
+                if (title.genres.isNotEmpty()) Text(
+                    title.genres.joinToString(" · "), color = secondary, fontSize = 13.sp, lineHeight = 18.sp,
+                    style = TextStyle(textDirection = TextDirection.Content),
+                )
+            }
+            if (title.ratings.isNotEmpty()) TitleRatings(title.ratings)
+            if (lastPlayed != null || (title.series && title.nextEpisode.isNotBlank())) Column(
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                lastPlayed?.let { Text(it.label(title.series), fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium) }
+                if (title.series && title.nextEpisode.isNotBlank()) {
+                    Text(title.nextEpisode, color = secondary, fontSize = 13.sp, lineHeight = 18.sp)
+                }
+            }
+            if (title.description.isNotBlank()) Text(
+                Html.fromHtml(title.description, Html.FROM_HTML_MODE_LEGACY).toString().trim(),
+                fontSize = 15.sp, lineHeight = 22.sp,
+                style = TextStyle(lineBreak = LineBreak.Paragraph, textDirection = TextDirection.Content),
+            )
+            if (title.cast.isNotEmpty()) Row(
+                Modifier.widthIn(max = 320.dp).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                for (person in title.cast) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        CatalogImage(
+                            media, person.photo, Modifier.size(51.dp, 65.dp).clip(RoundedCornerShape(8.dp)), 260,
+                        ) {
+                            Image(painterResource(R.drawable.media_person), null, Modifier.size(27.dp),
+                                colorFilter = ColorFilter.tint(secondary.copy(alpha = .52f)))
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(person.name, fontSize = 13.sp, lineHeight = 17.sp, fontWeight = FontWeight.Medium,
+                                style = TextStyle(textDirection = TextDirection.Content))
+                            if (person.role.isNotBlank()) Text(person.role, color = secondary, fontSize = 12.sp,
+                                lineHeight = 16.sp, style = TextStyle(textDirection = TextDirection.Content))
+                        }
+                    }
+                }
+            }
+            if (busy) Text("Contacting 30nama…", color = secondary, fontSize = 13.sp)
+            notice?.let { Text(it, color = Color(0xFFFFDCA6), fontSize = 13.sp) }
         }
     }
 
     if (picking && video != null) {
-        EpisodePicker(video.episodes, video.episodes.firstOrNull { it.fileId != 0 && it.fileId == video.resumeFile },
+        EpisodePicker(video.episodes, selected = null, lastPlayed = lastPlayed,
             onClose = { picking = false; actionFocus = FocusMove("title/play", actionFocus.revision + 1) }) {
             picking = false
             playing = it

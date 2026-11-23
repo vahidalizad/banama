@@ -27,16 +27,39 @@ internal data class MediaTitle(
     val runtime: Int,
     val seasons: Int,
     val genres: List<String>,
-    val ratings: List<String>,
+    val ratings: List<MediaRating>,
     val nextEpisode: String,
     val freeStream: Boolean,
     val freeDownload: Boolean,
+    val ageRating: String,
+    val countries: List<String>,
+    val cast: List<CastMember>,
 )
+
+internal data class CastMember(val name: String, val role: String, val photo: String?)
+internal enum class RatingSource(val key: String, val label: String) {
+    IMDB("imdb", "IMDb"),
+    NAMA("30nama", "30nama"),
+    ROTTEN_TOMATOES("rottentomatoes", "Rotten Tomatoes"),
+    METACRITIC("metacritic", "Metacritic"),
+    MY_DRAMA_LIST("mydramalist", "MyDramaList"),
+    MY_ANIME_LIST("myanimelist", "MyAnimeList"),
+}
+
+internal data class MediaRating(val source: RatingSource, val score: String, val votes: Int)
 
 internal data class TitlePage(val titles: List<MediaTitle>, val pages: Int)
 internal data class BrowseOption(val label: String, val value: String)
-internal data class MediaAccount(val days: Int?, val stream: Boolean, val download: Boolean)
+internal data class MediaAccount(val days: Int?, val stream: Boolean, val download: Boolean, val userId: Int)
 internal data class Caption(val language: String, val url: String)
+internal data class EpisodeNumber(val season: Int, val episode: Int) : Comparable<EpisodeNumber> {
+    override fun compareTo(other: EpisodeNumber) = compareValuesBy(this, other, EpisodeNumber::season, EpisodeNumber::episode)
+}
+
+internal data class WatchPosition(val episode: EpisodeNumber, val timeMs: Long)
+internal data class WatchedTitle(val title: MediaTitle, val position: WatchPosition)
+internal data class UpcomingEpisode(val title: MediaTitle, val episode: EpisodeNumber)
+
 internal data class MediaEpisode(
     val fileId: Int,
     val season: Int,
@@ -44,15 +67,35 @@ internal data class MediaEpisode(
     val name: String,
     val hls: String?,
     val captions: List<Caption>,
-)
+    val progressToken: String = "",
+    val markers: PlaybackMarkers = PlaybackMarkers(null, null),
+) {
+    val key get() = EpisodeNumber(season, number)
+}
+
+internal data class PlaybackMarkers(val intro: LongRange?, val creditsMs: Long?)
 
 internal data class DownloadVideo(val season: Int, val episode: Int, val url: String, val captions: List<Caption>)
 internal data class PlaybackCatalog(
     val episodes: List<MediaEpisode>,
     val resumeFile: Int,
     val resumeMs: Long,
-    val downloads: List<DownloadVideo>? = null,
-)
+) {
+    val savedPosition: WatchPosition?
+        get() = episodes.firstOrNull { resumeFile > 0 && it.fileId == resumeFile }
+            ?.let { WatchPosition(it.key, resumeMs) }
+
+    fun nextEpisode(after: MediaEpisode): MediaEpisode? =
+        episodes.filter { it.key > after.key }.minByOrNull(MediaEpisode::key)
+}
+
+internal fun PlaybackCatalog.seriesEpisodes(title: MediaTitle): List<UpcomingEpisode> =
+    episodes.filter { it.number > 0 }
+        .distinctBy(MediaEpisode::key).sortedBy(MediaEpisode::key)
+        .map { UpcomingEpisode(title, it.key) }
+
+internal fun List<UpcomingEpisode>.nextAfter(watched: EpisodeNumber?): UpcomingEpisode? =
+    watched?.let { previous -> firstOrNull { it.episode > previous } }
 
 internal fun isUhd(width: Int, height: Int) = width >= 3840 || height >= 2160
 
@@ -62,12 +105,14 @@ internal fun browseParameters(filters: Map<String, String>) = JSONObject().apply
     }
 }.toString()
 
-internal fun rangeAccepted(status: Int, range: String?, offset: Long): Boolean {
-    val fields = range?.let { Regex("""bytes (\d+)-(\d+)/(\d+|\*)""").matchEntire(it) } ?: return false
-    val first = fields.groupValues[1].toLongOrNull() ?: return false
-    val last = fields.groupValues[2].toLongOrNull() ?: return false
-    val total = fields.groupValues[3].toLongOrNull()
-    return status == 206 && first == offset && last == offset && (total == null || total > last)
+internal fun rangeSize(status: Int, range: String?, offset: Long): Long? {
+    if (status != 206) return null
+    val fields = range?.let { Regex("""bytes (\d+)-(\d+)/(\d+|\*)""").matchEntire(it) } ?: return null
+    val first = fields.groupValues[1].toLongOrNull() ?: return null
+    val last = fields.groupValues[2].toLongOrNull() ?: return null
+    if (first != offset || last != offset) return null
+    val total = fields.groupValues[3]
+    return if (total == "*") 0L else total.toLongOrNull()?.takeIf { it > last }
 }
 
 internal fun matchesTitle(query: String, english: String, persian: String): Boolean {
@@ -140,6 +185,12 @@ private fun JSONObject.art(key: String): String? =
     sequenceOf(text(key), optJSONObject(key)?.text("webp"), optJSONObject(key)?.text("jpg"))
         .firstOrNull { httpsUri(it) != null }
 
+private fun JSONObject.poster(size: String): String? {
+    val poster = optJSONObject("image")?.optJSONObject("poster") ?: return null
+    return sequenceOf(poster.optJSONObject("webp")?.text(size), poster.optJSONObject("jpg")?.text(size), poster.text("preview"))
+        .firstOrNull { httpsUri(it) != null }
+}
+
 internal fun JSONObject.mediaTitle(): MediaTitle? {
     val id = optInt("id")
     val title = optJSONObject("title") ?: return null
@@ -148,32 +199,64 @@ internal fun JSONObject.mediaTitle(): MediaTitle? {
     val info = optJSONObject("info")
     val options = optJSONObject("options")
     val plot = optJSONObject("plot")
-    val image = optJSONObject("image")
-    val poster = image?.optJSONObject("poster")
-    val posterUrl = sequenceOf(
-        poster?.optJSONObject("webp")?.text("medium"), poster?.optJSONObject("jpg")?.text("medium"), poster?.text("preview"),
-    ).firstOrNull { httpsUri(it) != null }
     val scores = optJSONObject("score")
-    val ratings = listOf(
-        "imdb" to "IMDb", "30nama" to "30nama", "rottentomatoes" to "Rotten Tomatoes",
-        "metacritic" to "Metacritic", "mydramalist" to "MyDramaList", "myanimelist" to "MyAnimeList",
-    ).mapNotNull { (key, label) ->
-        val score = scores?.optJSONObject(key)?.text("score").orEmpty()
-        score.takeIf { (it.removeSuffix("%").toDoubleOrNull() ?: 0.0) > 0 }?.let { "$label $it" }
+    val ratings = RatingSource.entries.mapNotNull { source ->
+        val entry = scores?.optJSONObject(source.key) ?: return@mapNotNull null
+        val score = entry.text("score")
+        if ((score.removeSuffix("%").toDoubleOrNull() ?: 0.0) > 0) {
+            MediaRating(source, score, entry.optInt("votes").coerceAtLeast(0))
+        } else null
     }
     return MediaTitle(
         id, name, title.text("local").takeUnless { it == name }.orEmpty(), info?.optInt("year") ?: 0,
         options?.optBoolean("is_series") == true || options?.text("title_type") == "series",
-        posterUrl, image?.art("cover"), plot?.text("english")?.ifBlank { plot.text("local") }.orEmpty(),
+        poster("medium"), optJSONObject("image")?.art("cover"), plot?.text("english")?.ifBlank { plot.text("local") }.orEmpty(),
         info?.optJSONObject("time")?.optInt("default") ?: 0, info?.optInt("seasons") ?: 0,
         optJSONArray("genre").objects().map { it.text("name") }.filter(String::isNotBlank), ratings,
         optJSONObject("air")?.text("next_episode_caption").orEmpty(),
         options?.optBoolean("free_stream") == true, options?.optBoolean("free_download") == true,
+        info?.text("age").orEmpty(),
+        optJSONArray("country").objects().map { it.text("name") }.filter(String::isNotBlank),
+        optJSONArray("cast").objects().mapNotNull { person ->
+            person.text("name").takeIf(String::isNotBlank)?.let { CastMember(it, person.text("as"), person.poster("medium")) }
+        }.take(3),
     )
 }
 
 internal fun JSONObject.titlePage() =
     TitlePage(optJSONArray("posts").objects().mapNotNull { it.mediaTitle() }.distinctBy(MediaTitle::id), optInt("pages", 1))
+
+internal fun JSONObject.watchHistory(): Map<Int, WatchedTitle> =
+    optJSONArray("posts").objects().mapNotNull { post ->
+        val title = post.mediaTitle() ?: return@mapNotNull null
+        val data = post.optJSONObject("data") ?: return@mapNotNull null
+        if (data.isNull("time")) return@mapNotNull null
+        val episode = if (title.series) {
+            val season = data.text("season").seasonIndex() ?: return@mapNotNull null
+            val number = data.episodeIndex() ?: return@mapNotNull null
+            EpisodeNumber(season, number)
+        } else EpisodeNumber(0, 0)
+        title.id to WatchedTitle(title, WatchPosition(episode, data.watchTime()))
+    }.toMap()
+
+private fun JSONObject.watchTime() = optLong("time").coerceIn(0, Long.MAX_VALUE / 1000) * 1000L
+
+private fun JSONObject.marker(key: String): Long? {
+    val parts = text(key).trim().split(':')
+    val tail = parts.last().toDoubleOrNull() ?: return null
+    val seconds = when (parts.size) {
+        1 -> tail
+        2, 3 -> {
+            if (tail !in 0.0..<60.0) return null
+            val minutes = parts[parts.lastIndex - 1].toIntOrNull()?.takeIf { it in 0..59 } ?: return null
+            val hours = if (parts.size == 2) 0 else parts[0].toIntOrNull()?.takeIf { it >= 0 } ?: return null
+            hours * 3600.0 + minutes * 60 + tail
+        }
+        else -> return null
+    }
+    return seconds.takeIf { it.isFinite() && it >= 0 && it < Long.MAX_VALUE / 1000.0 }
+        ?.let { (it * 1000).toLong() }
+}
 
 internal fun JSONObject.playbackCatalog(): PlaybackCatalog {
     val recent = optJSONObject("continue_watching")
@@ -187,32 +270,58 @@ internal fun JSONObject.playbackCatalog(): PlaybackCatalog {
         val captions = subs?.keys()?.asSequence()?.mapNotNull { lang ->
             subs.text(lang).takeIf { httpsUri(it) != null }?.let { Caption(lang, it) }
         }?.toList().orEmpty()
+        val options = entry.optJSONObject("options")
+        val introStart = options?.marker("intro_start")
+        val introEnd = options?.marker("intro_end")
+        val intro = if (introStart != null && introEnd != null && introStart < introEnd) introStart..<introEnd else null
         MediaEpisode(
-            info.optInt("file_id"), info.optInt("season"), info.optInt("episode_number", info.optInt("episode")),
-            info.text("episode_name"), hls, captions,
+            info.optInt("file_id"), info.text("season").seasonIndex() ?: 0, info.episodeIndex() ?: 0,
+            info.text("episode_name"), hls, captions, options?.text("token").orEmpty(),
+            PlaybackMarkers(intro, options?.marker("end")?.takeIf { it > 0 }),
         )
     }
-    return PlaybackCatalog(videos, recent?.optInt("file_id") ?: 0, (recent?.optLong("time") ?: 0) * 1000)
+    return PlaybackCatalog(videos, recent?.optInt("file_id") ?: 0, recent?.watchTime() ?: 0)
 }
 
-private fun JSONObject.isUhdDownload() = Regex("""(?i)(2160|\b4k\b|\buhd\b)""").containsMatchIn(
-    "${text("resolution")} ${text("quality")}",
-) || Regex("""(?:3840|4096)\s*[x×]""").containsMatchIn(text("resolution"))
+private val seasonPattern = Regex("""(?i)(?:s(?:eason)?\s*)?(\d+)""")
+private val episodePattern = Regex("""(?i)(?:^|\W|\d)(?:episode\s*|e)(\d+)\b""")
+private val uhdPattern = Regex("""(?i)\b(?:2160p?|4\s*k|uhd)\b|\b(?:3840|4096)\s*[x×]\s*\d+""")
+
+private fun String.seasonIndex(): Int? = seasonPattern.matchEntire(trim())?.groupValues?.get(1)?.toIntOrNull()
+
+private fun JSONObject.episodeIndex(): Int? = sequenceOf(text("episode_number"), text("episode"))
+    .mapNotNull { it.trim().toIntOrNull() ?: episodePattern.find(it)?.groupValues?.get(1)?.toIntOrNull() }
+    .firstOrNull()
+
+private fun JSONObject.isUhdDownload() =
+    uhdPattern.containsMatchIn("${text("resolution")} ${text("quality")} ${text("tags")}")
 
 internal fun JSONObject.downloads(): List<DownloadVideo> {
     val bySeason = optJSONObject("download")
-    val rows = optJSONArray("download").objects() + bySeason?.keys()?.asSequence()
-        ?.flatMap { bySeason.optJSONArray(it).objects() }?.toList().orEmpty()
-    return rows.filter { it.isUhdDownload() }.flatMap { row ->
-        val season = row.optInt("season_int", row.optInt("season"))
+    val rows = optJSONArray("download").objects().map { null to it } + bySeason?.keys()?.asSequence()
+        ?.flatMap { key -> bySeason.optJSONArray(key).objects().map { key.seasonIndex() to it } }
+        ?.toList().orEmpty()
+    return rows.flatMap { (groupSeason, row) ->
+        val releaseUhd = row.isUhdDownload()
+        val season = row.text("season_int").seasonIndex() ?: row.text("season").seasonIndex() ?: groupSeason ?: 0
         val links = row.optJSONArray("link").objects().ifEmpty { listOf(row) }
         links.mapNotNull { link ->
+            if (!releaseUhd && !link.isUhdDownload()) return@mapNotNull null
             val url = link.text("dl").takeIf { httpsUri(it) != null } ?: return@mapNotNull null
             val subtitle = link.text("persian_subtitle").ifBlank { row.text("persian_subtitle") }
             val captions = if (httpsUri(subtitle) != null) listOf(Caption("fa", subtitle)) else emptyList()
-            DownloadVideo(season, link.optInt("episode"), url, captions)
+            DownloadVideo(season, link.episodeIndex() ?: row.episodeIndex() ?: 0, url, captions)
         }
     }.distinctBy { it.url }
+}
+
+internal fun PlaybackCatalog.includeDownloads(downloads: List<DownloadVideo>): PlaybackCatalog {
+    val existing = episodes.mapTo(mutableSetOf()) { it.season to it.number }
+    return copy(episodes = episodes + downloads.mapNotNull { download ->
+        if (existing.add(download.season to download.episode)) {
+            MediaEpisode(0, download.season, download.episode, "", null, download.captions)
+        } else null
+    })
 }
 
 private fun java.io.InputStream.readBounded(limit: Int): ByteArray {
@@ -248,16 +357,18 @@ private fun <T> readMedia(address: URI, range: Long? = null, read: (HttpsURLConn
     return null
 }
 
-internal suspend fun supportsByteSeeking(address: String): Boolean = withContext(Dispatchers.IO) {
-    val uri = httpsUri(address) ?: return@withContext false
+internal suspend fun seekableDownloadSize(address: String): Long? = withContext(Dispatchers.IO) {
+    val uri = httpsUri(address) ?: return@withContext null
     runCatching {
-        listOf(0L, 1_048_576L).all { offset ->
+        fun sizeAt(offset: Long): Long? =
             readMedia(uri, offset) { connection ->
-                rangeAccepted(connection.responseCode, connection.getHeaderField("Content-Range"), offset) &&
-                    connection.inputStream.use { it.read() >= 0 && it.read() == -1 }
-            } == true
-        }
-    }.getOrDefault(false)
+                val total = rangeSize(connection.responseCode, connection.getHeaderField("Content-Range"), offset)
+                total?.takeIf { connection.inputStream.use { it.read() >= 0 && it.read() == -1 } }
+            }
+        val first = sizeAt(0) ?: return@runCatching null
+        val seek = sizeAt(1_048_576L) ?: return@runCatching null
+        maxOf(first, seek).takeIf { first == 0L || seek == 0L || first == seek }
+    }.getOrNull()
 }
 
 internal class MediaArtwork {

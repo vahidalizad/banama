@@ -18,10 +18,12 @@ class MediaCatalogTest {
     fun progressivePlaybackRequiresTheRequestedOffset() {
         assertTrue(isUhd(3840, 1600))
         assertFalse(isUhd(2560, 1440))
-        assertTrue(rangeAccepted(206, "bytes 1048576-1048576/12000000", 1048576))
-        assertFalse(rangeAccepted(200, "bytes 1048576-1048576/12000000", 1048576))
-        assertFalse(rangeAccepted(206, "bytes 0-0/12000000", 1048576))
-        assertFalse(rangeAccepted(206, "bytes 0-1/1", 0))
+        assertEquals(12_000_000L, rangeSize(206, "bytes 1048576-1048576/12000000", 1048576))
+        assertEquals(7_500_000_000L, rangeSize(206, "bytes 0-0/7500000000", 0))
+        assertEquals(0L, rangeSize(206, "bytes 0-0/*", 0))
+        assertEquals(null, rangeSize(200, "bytes 1048576-1048576/12000000", 1048576))
+        assertEquals(null, rangeSize(206, "bytes 0-0/12000000", 1048576))
+        assertEquals(null, rangeSize(206, "bytes 0-1/1", 0))
     }
 
     @Test
@@ -30,7 +32,8 @@ class MediaCatalogTest {
             {"continue_watching":{"file_id":19,"time":43},"hls":[
                 {"info":{"file_id":19,"season":2,"episode_number":3},"file":{
                     "m3u8":[{"default":"https://media.example/stream.m3u8"}],
-                    "subtitle":{"fa":"https://media.example/episode.vtt"}}}
+                    "subtitle":{"fa":"https://media.example/episode.vtt"}},"options":{"token":"test-progress",
+                        "intro_start":0,"intro_end":"00:01:03.500","end":"00:42:12"}}
             ]}
         """).playbackCatalog()
         assertEquals(19, stream.resumeFile)
@@ -38,6 +41,9 @@ class MediaCatalogTest {
         assertEquals(2, stream.episodes.single().season)
         assertEquals(3, stream.episodes.single().number)
         assertEquals("fa", stream.episodes.single().captions.single().language)
+        assertEquals("test-progress", stream.episodes.single().progressToken)
+        assertEquals(WatchPosition(EpisodeNumber(2, 3), 43000L), stream.savedPosition)
+        assertEquals(PlaybackMarkers(0L..<63_500L, 2_532_000L), stream.episodes.single().markers)
 
         val releases = JSONObject("""
             {"download":{"Season 2":[
@@ -50,9 +56,82 @@ class MediaCatalogTest {
     }
 
     @Test
+    fun includesDownloadOnlyEpisodesEvenWhenOtherEpisodesHaveHls() {
+        val first = MediaEpisode(28, 2, 1, "", "https://media.example/stream.m3u8", emptyList())
+        val catalog = PlaybackCatalog(listOf(first), 28, 1000L)
+        val releases = JSONObject("""
+            {"download":{"s2":[{"link":[
+                {"episode":"Episode 1","quality":"2160p","dl":"https://media.example/first.mkv"},
+                {"episode":"S02E02","tags":["4K"],"dl":"https://media.example/second.mkv"},
+                {"episode":"02","resolution":"3840×1600","dl":"https://media.example/second-alt.mkv"},
+                {"episode":"3","quality":"1080p","dl":"https://media.example/third.mkv"}
+            ]}]}}
+        """).downloads()
+        assertEquals(listOf(1, 2, 2), releases.map(DownloadVideo::episode))
+        assertTrue(releases.all { it.season == 2 })
+
+        val merged = catalog.includeDownloads(releases)
+        assertEquals(first, merged.episodes.first())
+        assertEquals(listOf(1, 2), merged.episodes.map(MediaEpisode::number))
+        assertEquals(null, merged.episodes.last().hls)
+        assertEquals(28, merged.resumeFile)
+    }
+
+    @Test
     fun advancedSearchSendsGenreAsAnArray() {
         val filters = JSONObject(browseParameters(mapOf("genre" to "drama", "type" to "series")))
         assertEquals("drama", filters.getJSONArray("genre").getString(0))
         assertEquals("series", filters.getString("type"))
+    }
+
+    @Test
+    fun watchHistorySupportsZeroTimeAndFiltersOutAlreadyPlayedEpisodes() {
+        val history = JSONObject("""
+            {"posts":[{"id":22,"title":{"english":"Series"},"options":{"is_series":true},
+                "data":{"season":1,"episode":"10","time":0}},
+                {"id":23,"title":{"english":"Movie"},"data":{"time":3720}}]}
+        """).watchHistory()
+        val watched = history.getValue(22)
+        assertEquals(WatchPosition(EpisodeNumber(1, 10), 0L), watched.position)
+        assertEquals(WatchPosition(EpisodeNumber(0, 0), 3_720_000L), history.getValue(23).position)
+
+        val catalog = JSONObject("""
+            {"continue_watching":{"file_id":17,"time":0},"hls":[
+                {"info":{"file_id":30,"season":2,"episode_number":1},"file":{"m3u8":[{"default":"https://media.example/s2.m3u8"}]}},
+                {"info":{"file_id":17,"season":1,"episode_number":10},"file":{"m3u8":[{"default":"https://media.example/s1.m3u8"}]}},
+                {"info":{"file_id":31,"season":2,"episode_number":1},"file":{"m3u8":[{"default":"https://media.example/alt.m3u8"}]}}
+            ]}
+        """).playbackCatalog().includeDownloads(listOf(DownloadVideo(1, 11, "https://media.example/uhd.mkv", emptyList())))
+        assertEquals(watched.position, catalog.savedPosition)
+        val episodes = catalog.seriesEpisodes(watched.title)
+        assertEquals(null, episodes.nextAfter(null))
+        assertEquals(EpisodeNumber(1, 11), episodes.nextAfter(watched.position.episode)?.episode)
+        assertEquals(EpisodeNumber(2, 1), episodes.nextAfter(EpisodeNumber(1, 11))?.episode)
+        assertEquals(null, episodes.nextAfter(EpisodeNumber(2, 1)))
+        val lastInSeason = catalog.episodes.first { it.fileId == 17 }
+        val download = catalog.nextEpisode(lastInSeason)!!
+        assertEquals(EpisodeNumber(1, 11), download.key)
+        val nextSeason = catalog.nextEpisode(download)!!
+        assertEquals(EpisodeNumber(2, 1), nextSeason.key)
+        assertEquals(null, catalog.nextEpisode(nextSeason))
+    }
+
+    @Test
+    fun seriesDetailsKeepCertificationCountriesAndCastRoles() {
+        val title = JSONObject("""
+            {"id":22,"title":{"english":"Series"},"info":{"age":"TV-MA","year":2025,"time":{"default":50}},
+                "country":[{"name":"United Kingdom"},{"name":"United States"}],
+                "score":{"imdb":{"score":8.3,"votes":114200},"30nama":{"score":8.54},
+                    "rottentomatoes":{"score":"71%"},"metacritic":{"score":0}},
+                "cast":[{"name":"Tom Hardy","as":"Harry Da Souza","image":{"poster":{"webp":{"medium":"https://media.example/actor.webp"}}}}]}
+        """).mediaTitle()!!
+        assertEquals("TV-MA", title.ageRating)
+        assertEquals(listOf("United Kingdom", "United States"), title.countries)
+        assertEquals(listOf(
+            MediaRating(RatingSource.IMDB, "8.3", 114200),
+            MediaRating(RatingSource.NAMA, "8.54", 0),
+            MediaRating(RatingSource.ROTTEN_TOMATOES, "71%", 0),
+        ), title.ratings)
+        assertEquals(CastMember("Tom Hardy", "Harry Da Souza", "https://media.example/actor.webp"), title.cast.single())
     }
 }
