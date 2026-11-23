@@ -12,6 +12,7 @@ import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.text.Normalizer
+import java.time.Year
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
@@ -27,6 +28,7 @@ internal data class MediaTitle(
     val runtime: Int,
     val seasons: Int,
     val genres: List<String>,
+    val genreKeys: Set<String>,
     val ratings: List<MediaRating>,
     val nextEpisode: String,
     val freeStream: Boolean,
@@ -50,6 +52,23 @@ internal data class MediaRating(val source: RatingSource, val score: String, val
 
 internal data class TitlePage(val titles: List<MediaTitle>, val pages: Int)
 internal data class BrowseOption(val label: String, val value: String)
+internal const val FIRST_RELEASE_YEAR = 1888
+internal enum class SearchOrder(val label: String, val parameter: String) {
+    DEFAULT("Default order", "update"),
+    RELEASE("Newest releases", "year"),
+    RANK("IMDb rank", "imdb-rate");
+
+    fun sort(titles: List<MediaTitle>) = when (this) {
+        DEFAULT -> titles
+        RELEASE -> {
+            val range = FIRST_RELEASE_YEAR..Year.now().value
+            titles.sortedByDescending { it.year.takeIf(range::contains) ?: 0 }
+        }
+        RANK -> titles.sortedByDescending {
+            it.ratings.firstOrNull { rating -> rating.source == RatingSource.IMDB }?.score?.toDoubleOrNull() ?: 0.0
+        }
+    }
+}
 internal data class MediaAccount(val days: Int?, val stream: Boolean, val download: Boolean, val userId: Int)
 internal data class Caption(val language: String, val url: String)
 internal data class EpisodeNumber(val season: Int, val episode: Int) : Comparable<EpisodeNumber> {
@@ -99,11 +118,37 @@ internal fun List<UpcomingEpisode>.nextAfter(watched: EpisodeNumber?): UpcomingE
 
 internal fun isUhd(width: Int, height: Int) = width >= 3840 || height >= 2160
 
-internal fun browseParameters(filters: Map<String, String>) = JSONObject().apply {
-    for ((key, value) in filters) {
-        put(key, if (key == "genre") JSONArray().put(value) else value)
+internal fun browseParameters(
+    type: String?,
+    genres: Set<String>,
+    years: Set<Int>,
+    rating: String?,
+    order: SearchOrder,
+) = JSONObject().apply {
+    type?.let { put("type", it) }
+    rating?.let { put("imdb_rate", it) }
+    if (genres.isNotEmpty()) put("genre", JSONArray(genres))
+    if (years.isNotEmpty() || order == SearchOrder.RELEASE) {
+        // 30nama requires both bounds and otherwise puts invalid years first.
+        put("min_year", (years.minOrNull() ?: FIRST_RELEASE_YEAR).toString())
+        put("max_year", (years.maxOrNull() ?: Year.now().value).toString())
     }
 }.toString()
+
+internal fun MediaTitle.matchesRelease(years: Set<Int>) = years.isEmpty() || year in years
+
+internal fun MediaTitle.matchesGenre(choices: Set<BrowseOption>) = choices.all {
+    it.value.lowercase(Locale.ROOT) in genreKeys || it.label.lowercase(Locale.ROOT) in genreKeys
+}
+
+internal fun MediaTitle.matchesLibraryQuery(query: String): Boolean {
+    if (query.isBlank()) return true
+    fun normalize(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
+        .lowercase(Locale.ROOT).replace('ي', 'ی').replace('ك', 'ک')
+        .replace(Regex("[\\p{M}\\u0640\\u200c]"), "")
+    val text = normalize("$name $localized $year")
+    return normalize(query).split(Regex("\\s+")).all { it in text }
+}
 
 internal fun rangeSize(status: Int, range: String?, offset: Long): Long? {
     if (status != 206) return null
@@ -113,14 +158,6 @@ internal fun rangeSize(status: Int, range: String?, offset: Long): Long? {
     if (first != offset || last != offset) return null
     val total = fields.groupValues[3]
     return if (total == "*") 0L else total.toLongOrNull()?.takeIf { it > last }
-}
-
-internal fun matchesTitle(query: String, english: String, persian: String): Boolean {
-    fun normalize(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
-        .lowercase(Locale.ROOT).replace('ي', 'ی').replace('ك', 'ک')
-        .replace(Regex("[\\p{M}\\u0640\\u200c]"), "")
-    val text = normalize("$english $persian")
-    return normalize(query).split(Regex("\\s+")).all { it in text }
 }
 
 internal fun httpsUri(value: String?): URI? = value?.let {
@@ -146,7 +183,7 @@ internal class NamaApi(
             if (!configured) throw NamaFailure()
             val connection = httpsUri("$base/action/$action")!!.toURL().openConnection() as HttpsURLConnection
             connection.connectTimeout = 6_000
-            connection.readTimeout = 9_000
+            connection.readTimeout = if (action == "advanced_search" || action == "user_list") 25_000 else 9_000
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
             connection.doOutput = true
@@ -167,7 +204,8 @@ internal class NamaApi(
                     throw NamaFailure(browserChallenge = connection.getHeaderField("cf-mitigated") == "challenge")
                 }
                 val result = connection.inputStream.use { JSONObject(it.readBounded(4 * 1024 * 1024).decodeToString()) }
-                if (action != "qrlogin_login" && (!result.optBoolean("success") || result.optBoolean("error"))) {
+                val emptyList = action == "user_list" && form["action"] == "list" && result.isEmptyLibraryResponse()
+                if (action != "qrlogin_login" && !emptyList && (!result.optBoolean("success") || result.optBoolean("error"))) {
                     throw NamaFailure(rejectedSession = result.optInt("status") == 401)
                 }
                 result.optJSONObject("result") ?: JSONObject()
@@ -175,6 +213,13 @@ internal class NamaApi(
                 connection.disconnect()
             }
         }
+}
+
+internal fun JSONObject.isEmptyLibraryResponse(): Boolean {
+    if (optInt("status") != 200) return false
+    val page = optJSONObject("result") ?: return false
+    return page.has("page") && page.optInt("pages", -1) in 0..1 && page.has("posts") &&
+        (page.isNull("posts") || page.optJSONArray("posts")?.length() == 0)
 }
 
 internal fun JSONObject.text(key: String): String = if (isNull(key)) "" else optString(key)
@@ -200,6 +245,7 @@ internal fun JSONObject.mediaTitle(): MediaTitle? {
     val options = optJSONObject("options")
     val plot = optJSONObject("plot")
     val scores = optJSONObject("score")
+    val genres = optJSONArray("genre").objects()
     val ratings = RatingSource.entries.mapNotNull { source ->
         val entry = scores?.optJSONObject(source.key) ?: return@mapNotNull null
         val score = entry.text("score")
@@ -212,7 +258,10 @@ internal fun JSONObject.mediaTitle(): MediaTitle? {
         options?.optBoolean("is_series") == true || options?.text("title_type") == "series",
         poster("medium"), optJSONObject("image")?.art("cover"), plot?.text("english")?.ifBlank { plot.text("local") }.orEmpty(),
         info?.optJSONObject("time")?.optInt("default") ?: 0, info?.optInt("seasons") ?: 0,
-        optJSONArray("genre").objects().map { it.text("name") }.filter(String::isNotBlank), ratings,
+        genres.map { it.text("name") }.filter(String::isNotBlank),
+        genres.flatMap { genre -> listOf("name", "slug", "value", "id").map(genre::text) }
+            .filter(String::isNotBlank).map { it.lowercase(Locale.ROOT) }.toSet(),
+        ratings,
         optJSONObject("air")?.text("next_episode_caption").orEmpty(),
         options?.optBoolean("free_stream") == true, options?.optBoolean("free_download") == true,
         info?.text("age").orEmpty(),

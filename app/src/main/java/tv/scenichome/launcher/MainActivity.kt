@@ -22,16 +22,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.text.Collator
-import java.time.Duration
-import java.time.ZonedDateTime
-import java.time.temporal.ChronoUnit
 
 internal data class TvApp(
     val pkg: String,
@@ -43,11 +36,6 @@ internal data class TvApp(
 class MainActivity : ComponentActivity() {
     internal val media by lazy { MediaStore(applicationContext) }
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
-    private val gallery by lazy { PhotoGallery(applicationContext) }
-    private val rotationEngine by lazy { PhotoRotation(ZonedDateTime::now, gallery::next) }
-    private val photoLock = Mutex()
-    private lateinit var rotation: RotationState
-    private var updatePhotos: Job? = null
     private var updateApps: Job? = null
 
     internal var apps by mutableStateOf<List<TvApp>>(emptyList())
@@ -60,12 +48,6 @@ class MainActivity : ComponentActivity() {
         private set
     internal var foreground by mutableStateOf(false)
         private set
-    internal var scene by mutableStateOf<LoadedScene?>(null)
-        private set
-    internal var paused by mutableStateOf(false)
-        private set
-    internal var photoBusy by mutableStateOf(false)
-        private set
     internal var notice by mutableStateOf<String?>(null)
         private set
 
@@ -73,12 +55,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         pinned = readPackages("pinned")
         recent = readPackages("recent")
-        paused = prefs.getBoolean("paused", false)
-        rotation = RotationState(
-            prefs.getString("photo", Scene.fallback.id) ?: Scene.fallback.id,
-            prefs.getLong("photo_hour", ZonedDateTime.now().truncatedTo(ChronoUnit.HOURS).toEpochSecond()),
-            paused,
-        )
         setContent { ScenicHome(this) }
     }
 
@@ -86,26 +62,10 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         foreground = true
         refreshApps()
-        updatePhotos?.cancel()
-        updatePhotos = lifecycleScope.launch {
-            if (scene == null) {
-                val id = rotation.photoId
-                val image = withContext(Dispatchers.IO) { gallery.restore(id) ?: gallery.restore(Scene.fallback.id) }
-                scene = image
-                if (image != null) saveRotation(rotation.copy(photoId = image.scene.id))
-            }
-            while (isActive) {
-                rotate()
-                val now = ZonedDateTime.now()
-                val nextHour = now.truncatedTo(ChronoUnit.HOURS).plusHours(1)
-                delay(Duration.between(now, nextHour).toMillis().coerceIn(50L, 60_000L))
-            }
-        }
     }
 
     override fun onPause() {
         foreground = false
-        updatePhotos?.cancel()
         super.onPause()
     }
 
@@ -200,11 +160,6 @@ class MainActivity : ComponentActivity() {
         if (installed != null) open(installed) else showNotice("YouTube couldn't be opened.")
     }
 
-    internal fun openPhotoSource() {
-        val source = scene?.scene?.source ?: Scene.fallback.source
-        if (!send(Intent(Intent.ACTION_VIEW, Uri.parse(source)))) showNotice("This TV has no browser for the photo page.")
-    }
-
     internal fun appInfo(app: TvApp) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri(app))
         if (!send(intent)) showNotice("App info couldn't be opened.")
@@ -239,39 +194,6 @@ class MainActivity : ComponentActivity() {
         order.add(index + offset, order.removeAt(index))
         pinned = order
         savePackages("pinned", pinned)
-    }
-
-    internal fun togglePause() {
-        paused = !paused
-        saveRotation(rotation.copy(paused = paused))
-        if (!paused) lifecycleScope.launch { rotate() }
-    }
-
-    internal fun nextPhoto() {
-        if (!photoBusy) lifecycleScope.launch { rotate(manual = true) }
-    }
-
-    private suspend fun rotate(manual: Boolean = false) = photoLock.withLock {
-        val state = rotation
-        val hour = ZonedDateTime.now().truncatedTo(ChronoUnit.HOURS).toEpochSecond()
-        if (!manual && (state.paused || state.hour == hour)) return@withLock
-        photoBusy = true
-        try {
-            val updated = withContext(Dispatchers.IO) { rotationEngine.advance(state, manual) }
-                ?: return@withLock
-            if (!manual && rotation.paused) return@withLock
-            updated.photo?.let { scene = it }
-            saveRotation(updated.state.copy(paused = paused))
-            if (manual && updated.photo == null) showNotice("No other photo is available right now.")
-        } finally {
-            photoBusy = false
-        }
-    }
-
-    private fun saveRotation(state: RotationState) {
-        rotation = state
-        prefs.edit().putBoolean("paused", state.paused)
-            .putString("photo", state.photoId).putLong("photo_hour", state.hour).apply()
     }
 
     private fun packageUri(app: TvApp) = Uri.fromParts("package", app.pkg, null)

@@ -8,10 +8,24 @@ import org.junit.Test
 
 class MediaCatalogTest {
     @Test
-    fun titleSearchAcceptsPersianKeyboardVariantsAndTitleYear() {
-        assertTrue(matchesTitle("کِیوان", "Keyvan 2024", "كيوان"))
-        assertTrue(matchesTitle("KEYVAN 2024", "Keyvan 2024", "کیوان"))
-        assertFalse(matchesTitle("Keyvan 2023", "Keyvan 2024", "کیوان"))
+    fun emptyLibraryReplyDoesNotMaskAccountOrServerErrors() {
+        val reply = JSONObject("""
+            {"success":false,"error":true,"status":200,"result":{"page":1,"pages":1,"posts":[]}}
+        """)
+        assertTrue(reply.isEmptyLibraryResponse())
+        assertTrue(reply.getJSONObject("result").titlePage().titles.isEmpty())
+        assertFalse(reply.put("status", 401).isEmptyLibraryResponse())
+        assertFalse(reply.put("status", 200).put("result", JSONObject()).isEmptyLibraryResponse())
+    }
+
+    @Test
+    fun librarySearchMatchesEnglishAndPersianTitlesAndYear() {
+        val title = JSONObject("""
+            {"id":1,"title":{"english":"Keyvan","local":"کیوان"},"info":{"year":2024}}
+        """).mediaTitle()!!
+        assertTrue(title.matchesLibraryQuery("كِيوان"))
+        assertTrue(title.matchesLibraryQuery("KEYVAN 2024"))
+        assertFalse(title.matchesLibraryQuery("Keyvan 2023"))
     }
 
     @Test
@@ -78,10 +92,37 @@ class MediaCatalogTest {
     }
 
     @Test
-    fun advancedSearchSendsGenreAsAnArray() {
-        val filters = JSONObject(browseParameters(mapOf("genre" to "drama", "type" to "series")))
-        assertEquals("drama", filters.getJSONArray("genre").getString(0))
+    fun advancedSearchSendsMultipleGenresAndBoundsTheSelectedYears() {
+        val filters = JSONObject(browseParameters("series", setOf("drama", "comedy"), setOf(1998, 2024), null, SearchOrder.DEFAULT))
+        assertEquals("""["drama","comedy"]""", filters.getJSONArray("genre").toString())
         assertEquals("series", filters.getString("type"))
+        assertEquals("1998", filters.getString("min_year"))
+        assertEquals("2024", filters.getString("max_year"))
+        assertEquals("imdb-rate", SearchOrder.RANK.parameter)
+        val newest = JSONObject(browseParameters(null, emptySet(), emptySet(), null, SearchOrder.RELEASE))
+        assertEquals(FIRST_RELEASE_YEAR.toString(), newest.getString("min_year"))
+        assertTrue(newest.getString("max_year").toInt() >= 2024)
+    }
+
+    @Test
+    fun exactYearsAndAllSelectedGenresWorkWithLocalSearchAndReleaseSorting() {
+        val titles = JSONObject("""
+            {"posts":[
+                {"id":1,"title":{"english":"A"},"info":{"year":1998},
+                    "genre":[{"name":"Drama","slug":"drama"},{"name":"Comedy","slug":"comedy"}],
+                    "score":{"imdb":{"score":"8.1"}}},
+                {"id":2,"title":{"english":"B"},"info":{"year":2023},
+                    "genre":[{"name":"Drama","slug":"drama"},{"name":"Comedy","slug":"comedy"}]},
+                {"id":3,"title":{"english":"C"},"info":{"year":2024},
+                    "genre":[{"name":"Comedy","slug":"comedy"},{"name":"Drama","slug":"drama"}],
+                    "score":{"imdb":{"score":"7.2"}}},
+                {"id":4,"title":{"english":"D"},"info":{"year":2024},"genre":[{"name":"Drama","slug":"drama"}]}
+            ]}
+        """).titlePage().titles
+        val selected = setOf(BrowseOption("Comedy", "comedy"), BrowseOption("Drama", "drama"))
+        val filtered = titles.filter { it.matchesRelease(setOf(1998, 2024)) && it.matchesGenre(selected) }
+        assertEquals(listOf(3, 1), SearchOrder.RELEASE.sort(filtered).map(MediaTitle::id))
+        assertEquals(listOf(1, 3), SearchOrder.RANK.sort(filtered).map(MediaTitle::id))
     }
 
     @Test

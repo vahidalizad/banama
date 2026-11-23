@@ -5,55 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.time.ZonedDateTime
 
 class LauncherPolicyTest {
-    private var now = ZonedDateTime.parse("2026-11-23T19:59+01:00[Europe/Amsterdam]")
-    private var calls = 0
-    private val photos = mapOf("cached" to "Cached image", "next" to "Next image")
-    private val rotation = PhotoRotation({ now }) { id ->
-        calls++
-        firstUsablePhoto(listOf("invalid", "cached", "next"), id, photos::get)
-    }
-    private val start = RotationState("fallback", now.withMinute(0).toEpochSecond(), paused = false)
-
-    @Test
-    fun rotatesAtAnHourBoundaryAndOnlyOnceInThatHour() {
-        assertNull(rotation.advance(start))
-        now = now.plusMinutes(1)
-        val result = requireNotNull(rotation.advance(start))
-        assertEquals("cached", result.state.photoId)
-        assertEquals("Cached image", result.photo)
-        assertNull(rotation.advance(result.state))
-        assertEquals(1, calls)
-    }
-
-    @Test
-    fun skipsInvalidImagesAndKeepsThePhotoIfNothingIsAvailable() {
-        val offline = PhotoRotation({ now }) { id ->
-            firstUsablePhoto(listOf("invalid", "cached"), id, photos::get)
-        }
-        val cached = requireNotNull(offline.advance(start, manual = true))
-        assertEquals("cached", cached.state.photoId)
-        val same = requireNotNull(offline.advance(cached.state, manual = true))
-        assertNull(same.photo)
-        assertEquals("cached", same.state.photoId)
-    }
-
-    @Test
-    fun pauseSurvivesManualChangeAndResumeCatchesUpAfterSeveralHours() {
-        now = now.plusHours(4)
-        val paused = start.copy(paused = true)
-        assertNull(rotation.advance(paused))
-        val manual = requireNotNull(rotation.advance(paused, manual = true))
-        assertTrue(manual.state.paused)
-        assertNull(rotation.advance(manual.state.copy(paused = false)))
-        val resumed = requireNotNull(rotation.advance(paused.copy(paused = false)))
-        assertFalse(resumed.state.paused)
-        assertEquals("cached", resumed.state.photoId)
-        assertEquals(now.withMinute(0).toEpochSecond(), resumed.state.hour)
-    }
-
     @Test
     fun dockAndFocusRecoverWhenAnAppDisappears() {
         val dock = dockApps(

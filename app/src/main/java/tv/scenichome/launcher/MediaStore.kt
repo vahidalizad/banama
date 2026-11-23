@@ -1,12 +1,12 @@
 package tv.scenichome.launcher
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
@@ -15,6 +15,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -97,7 +98,6 @@ private class NamaSession(context: Context) {
 }
 
 internal data class NamaPairing(val code: String, val url: String)
-internal data class MediaWallpaper(val url: String, val bitmap: Bitmap, val frosted: Bitmap)
 
 internal suspend fun <T> tryNama(block: suspend () -> T): Result<T> = try {
     Result.success(block())
@@ -105,6 +105,12 @@ internal suspend fun <T> tryNama(block: suspend () -> T): Result<T> = try {
     throw cancelled
 } catch (failure: Exception) {
     Result.failure(failure)
+}
+
+internal enum class MediaLibrary(val key: String, val label: String, val group: String, val order: String = "add_list") {
+    WATCHLIST("watch", "Watchlist", "watchlist", "update"),
+    NOTIFY("notify", "Notify", "notify"),
+    LIKED("liked", "Liked", "favorite"),
 }
 
 internal class MediaStore(context: Context) {
@@ -115,7 +121,6 @@ internal class MediaStore(context: Context) {
     private val progressLock = Mutex()
     private var token: String? = null
     private var initialized = false
-    private var watchlistPages = 1
 
     val artwork = MediaArtwork()
     val configured get() = api.configured
@@ -123,19 +128,17 @@ internal class MediaStore(context: Context) {
         private set
     var account by mutableStateOf<MediaAccount?>(null)
         private set
-    var watchlist by mutableStateOf<List<MediaTitle>>(emptyList())
+    var shelves by mutableStateOf<Map<MediaLibrary, TitlePage>>(emptyMap())
         private set
-    var newReleases by mutableStateOf<List<MediaTitle>>(emptyList())
-        private set
+    private val libraryRevisions = mutableStateMapOf<MediaLibrary, Int>()
+    private val watchlist get() = shelves[MediaLibrary.WATCHLIST]?.titles.orEmpty()
     var suggestions by mutableStateOf<List<MediaTitle>>(emptyList())
         private set
-    var wallpaper by mutableStateOf<MediaWallpaper?>(null)
+    var upcomingLoaded by mutableStateOf(false)
         private set
-    var connectionIssue by mutableStateOf(false)
-        private set
-    var loading by mutableStateOf(false)
-        private set
-    var listRevision by mutableIntStateOf(0)
+    private var connectionIssue by mutableStateOf(false)
+    private var loading by mutableStateOf(false)
+    var homeLoaded by mutableStateOf(false)
         private set
     var accountRevision by mutableIntStateOf(0)
         private set
@@ -168,49 +171,41 @@ internal class MediaStore(context: Context) {
         loading = true
         try {
             coroutineScope {
-                val catalog = async { tryNama { api.call("home") } }
-                val user = current?.let { async { tryNama { api.call("user", current).readAccount() } } }
-                val rows = current?.let { async { tryNama { list("watchlist", 1, current) } } }
-                val membership = current?.let { async { tryNama { api.call("user_mylist", current).readLists() } } }
-                val resume = current?.let { async { tryNama { api.call("continue_watching", current).watchHistory() } } }
-                val home = catalog.await()
+                if (current != null) {
+                    val resume = async { tryNama { api.call("continue_watching", current).watchHistory() } }
+                    val user = async { tryNama { api.call("user", current).readAccount() } }
+                    val updatedHistory = resume.await().getOrNull()
+                    if (current == token && updatedHistory != null) {
+                        streamProgress = streamProgress - updatedHistory.keys.filter { updatedHistory[it] != history[it] }.toSet()
+                        history = updatedHistory
+                    }
+                    val currentAccount = user.await()
+                    if (current == token && (currentAccount.exceptionOrNull() as? NamaFailure)?.rejectedSession == true) {
+                        forget(current)
+                    }
+                    if (current == token) {
+                        currentAccount.getOrNull()?.let { account = it }
+                        val membership = async { tryNama { api.call("user_mylist", current).readLists() } }
+                        val watch = tryNama { refreshShelf(MediaLibrary.WATCHLIST, current) }
+                        val updatedLists = membership.await()
+                        if (current == token) {
+                            updatedLists.getOrNull()?.let { lists = it }
+                            catalogRevision++
+                            connectionIssue = currentAccount.isFailure || watch.isFailure || updatedLists.isFailure
+                            listOf(MediaLibrary.NOTIFY, MediaLibrary.LIKED).forEach { library ->
+                                launch { tryNama { refreshShelf(library, current) } }
+                            }
+                        }
+                    }
+                }
+                val home = tryNama { api.call("home") }
                 home.getOrNull()?.let { result ->
-                    newReleases = result.optJSONObject("new_releases")?.titlePage()?.titles.orEmpty()
                     suggestions = result.optJSONObject("suggested")?.titlePage()?.titles.orEmpty()
                 }
-                val currentAccount = user?.await()
-                if (currentAccount?.exceptionOrNull().let { it is NamaFailure && it.rejectedSession } && current == token) {
-                    forget(current)
-                    return@coroutineScope
-                }
-                val updatedLists = membership?.await()
-                val updatedRows = rows?.await()
-                val updatedHistory = resume?.await()
-                if (current == token) {
-                    currentAccount?.getOrNull()?.let { account = it }
-                    val memberships = updatedLists?.getOrNull()
-                    val watch = updatedRows?.getOrNull()
-                    val titles = watch?.titles
-                    if ((memberships != null && lists != memberships) || (titles != null && titles != watchlist)) {
-                        listRevision++
-                    }
-                    if (memberships != null) {
-                        lists = memberships
-                    }
-                    if (watch != null) {
-                        watchlistPages = watch.pages
-                        watchlist = watch.titles
-                    }
-                    updatedHistory?.getOrNull()?.let { latest ->
-                        streamProgress = streamProgress - latest.keys.filter { latest[it]?.position != history[it]?.position }.toSet()
-                        history = latest
-                    }
-                    catalogRevision++
-                    connectionIssue = if (current == null) home.isFailure else
-                        currentAccount?.isFailure == true || updatedRows?.isFailure == true || updatedLists?.isFailure == true
-                }
+                homeLoaded = true
             }
         } finally {
+            homeLoaded = true
             loading = false
         }
     }
@@ -219,21 +214,6 @@ internal class MediaStore(context: Context) {
         val posts = optJSONObject(group)?.optJSONArray("post")
         if (posts == null) emptySet() else (0 until posts.length())
             .map { posts.optInt(it) }.filter { it > 0 }.toSet()
-    }
-
-    suspend fun refreshWallpaper() {
-        val current = token
-        val candidates = watchlist.mapNotNull(MediaTitle::cover).take(4)
-        for (url in candidates) {
-            if (current != token) return
-            if (wallpaper?.url == url) return
-            val bitmap = artwork.image(url, 1920) ?: continue
-            if (bitmap.width < bitmap.height) continue
-            val blur = withContext(Dispatchers.Default) { frostedWallpaper(bitmap) }
-            if (current == token) wallpaper = MediaWallpaper(url, bitmap, blur)
-            return
-        }
-        if (current == token && wallpaper?.url !in candidates) wallpaper = null
     }
 
     suspend fun newPairing(): NamaPairing {
@@ -264,16 +244,15 @@ internal class MediaStore(context: Context) {
 
     private fun clearAccount() {
         account = null
-        watchlist = emptyList()
-        watchlistPages = 1
-        wallpaper = null
+        shelves = emptyMap()
+        libraryRevisions.clear()
+        upcomingLoaded = false
         lists = emptyMap()
         history = emptyMap()
         localProgress = emptyMap()
         streamProgress = emptyMap()
         seriesEpisodes = emptyMap()
         artwork.clear()
-        listRevision++
         accountRevision++
     }
 
@@ -312,34 +291,48 @@ internal class MediaStore(context: Context) {
             val previous = lists[group].orEmpty()
             lists + (group to if (response == "add") previous + id else previous - id)
         } else lists
-        if (group == "watchlist") {
-            tryNama { list(group, 1, current) }.getOrNull()?.let {
-                if (current == token) {
-                    watchlistPages = it.pages
-                    watchlist = it.titles
-                }
-            }
-        }
-        if (current == token) listRevision++
-        confirmed || (updated != null && has(group, id) == adding)
+        val library = MediaLibrary.entries.first { it.group == group }
+        if (confirmed || (updated != null && has(group, id) == adding)) {
+            tryNama { refreshShelf(library, current) }
+            if (current != token) return@withLock false
+            libraryRevisions[library] = libraryRevision(library) + 1
+            if (library == MediaLibrary.WATCHLIST) catalogRevision++
+            true
+        } else false
     }
 
-    suspend fun list(group: String, page: Int, current: String? = token): TitlePage {
-        if (current == null) return TitlePage(emptyList(), 1)
-        return api.call("user_list", current, mapOf(
-            "action" to "list", "group" to group, "page" to page.toString(),
-            "orderby" to if (group == "watchlist") "update" else "add_list", "order" to "DESC",
+    private suspend fun refreshShelf(library: MediaLibrary, current: String) {
+        val first = libraryPage(library, 1, current)
+        if (current == token && first != shelves[library]) {
+            shelves = shelves + (library to first)
+            libraryRevisions[library] = libraryRevision(library) + 1
+        }
+    }
+
+    suspend fun list(library: MediaLibrary, page: Int): TitlePage {
+        val current = token ?: return TitlePage(emptyList(), 1)
+        if (page == 1) shelves[library]?.let { return it }
+        return libraryPage(library, page, current)
+    }
+
+    fun libraryRevision(library: MediaLibrary) = libraryRevisions[library] ?: 0
+
+    fun libraryRetry(library: MediaLibrary) = !loading &&
+        (library !in shelves || library == MediaLibrary.WATCHLIST && connectionIssue)
+
+    private suspend fun libraryPage(library: MediaLibrary, page: Int, current: String): TitlePage =
+        api.call("user_list", current, mapOf(
+            "action" to "list", "group" to library.group, "page" to page.toString(),
+            "orderby" to library.order, "order" to "DESC",
         )).titlePage()
-    }
 
-    suspend fun search(query: String, filters: Map<String, String>, page: Int): TitlePage =
-        if (query.isNotBlank()) {
-            api.call("search", form = mapOf("query" to query, "streamonly" to "false", "page" to page.toString())).titlePage()
-        } else {
-            api.call("advanced_search", form = mapOf(
-                "parameters" to browseParameters(filters), "orderby" to "update", "order" to "DESC", "page" to page.toString(),
-            )).titlePage()
-        }
+    suspend fun search(query: String, page: Int): TitlePage =
+        api.call("search", form = mapOf("query" to query, "streamonly" to "false", "page" to page.toString())).titlePage()
+
+    suspend fun browse(parameters: String, sort: SearchOrder, page: Int): TitlePage =
+        api.call("advanced_search", form = mapOf(
+            "parameters" to parameters, "orderby" to sort.parameter, "order" to "DESC", "page" to page.toString(),
+        )).titlePage()
 
     suspend fun filters(): Map<String, List<BrowseOption>> {
         val values = api.call("advanced_search_parameters")
@@ -376,12 +369,16 @@ internal class MediaStore(context: Context) {
             return titles.distinct().mapNotNull { seriesEpisodes[it]?.nextAfter(watchedThrough(it)) }
         }
 
+    val resumeEpisodes: List<UpcomingEpisode>
+        get() = history.values.map { UpcomingEpisode(it.title, lastPlayed(it.title.id)?.episode ?: it.position.episode) }
+
     suspend fun refreshUpcoming() = coroutineScope {
         val current = token ?: return@coroutineScope
+        if (catalogRevision == 0) return@coroutineScope
         val watchTitles = watchlist.toMutableList()
-        for (page in 2..watchlistPages) {
+        for (page in 2..(shelves[MediaLibrary.WATCHLIST]?.pages ?: 1)) {
             if (current != token) return@coroutineScope
-            val more = tryNama { list("watchlist", page, current) }.getOrNull()?.titles.orEmpty()
+            val more = tryNama { libraryPage(MediaLibrary.WATCHLIST, page, current) }.getOrNull()?.titles.orEmpty()
             if (more.isEmpty()) break
             watchTitles.addAll(more)
         }
@@ -409,6 +406,7 @@ internal class MediaStore(context: Context) {
         if (current == token) {
             streamProgress = streamProgress + positions
             seriesEpisodes = seriesEpisodes + episodes
+            upcomingLoaded = true
         }
     }
 

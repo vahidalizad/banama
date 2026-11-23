@@ -1,40 +1,5 @@
 package tv.scenichome.launcher
 
-import java.time.ZonedDateTime
-import java.time.temporal.ChronoUnit
-
-internal data class RotationState(val photoId: String, val hour: Long, val paused: Boolean)
-
-internal data class PhotoChoice<T>(val id: String, val value: T)
-
-internal class PhotoRotation<T>(
-    private val now: () -> ZonedDateTime,
-    private val nextPhoto: (String) -> PhotoChoice<T>?,
-) {
-    data class Update<T>(val state: RotationState, val photo: T?)
-
-    fun advance(state: RotationState, manual: Boolean = false): Update<T>? {
-        val hour = now().truncatedTo(ChronoUnit.HOURS).toEpochSecond()
-        if (!manual && (state.paused || state.hour == hour)) return null
-
-        val next = nextPhoto(state.photoId)
-        return Update(state.copy(photoId = next?.id ?: state.photoId, hour = hour), next?.value)
-    }
-}
-
-internal fun <T : Any> firstUsablePhoto(
-    ids: Iterable<String>,
-    current: String,
-    load: (String) -> T?,
-): PhotoChoice<T>? {
-    for (id in ids) {
-        if (id == current) continue
-        val image = load(id) ?: continue
-        return PhotoChoice(id, image)
-    }
-    return null
-}
-
 internal const val MAX_FAVORITES = 4
 
 private val homeControlPackages = setOf("com.android.tv.settings", "com.android.settings", "com.android.vending")
