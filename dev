@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+tty_flag=
+if [ -t 0 ] && [ -t 1 ]; then tty_flag=-t; fi
+exec docker run --rm -i ${tty_flag:+"$tty_flag"} --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/workspace" \
+  --mount type=volume,source=tv-android-home,target=/home/android \
+  tv-android-dev "$@"
