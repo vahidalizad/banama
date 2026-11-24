@@ -128,6 +128,8 @@ internal fun EpisodeHero(
     move: FocusMove?,
     focused: (UpcomingEpisode) -> Unit,
     open: (UpcomingEpisode) -> Unit,
+    options: (UpcomingEpisode) -> Unit,
+    showOptionsHint: Boolean,
 ) {
     val row = rememberLazyListState()
     LaunchedEffect(move) {
@@ -147,7 +149,7 @@ internal fun EpisodeHero(
                 "Resume ${clockTime(it.timeMs / 1000)}",
             ).joinToString(" · ")
         } ?: selected.episode.label()
-        Text(caption, color = foreground, fontSize = 14.sp)
+        Text(if (showOptionsHint) "$caption · Hold OK for options" else caption, color = foreground, fontSize = 14.sp)
         LazyRow(
             state = row, modifier = Modifier.fillMaxWidth().padding(top = 4.dp).focusGroup(),
             contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
@@ -164,6 +166,7 @@ internal fun EpisodeHero(
                     heroKey(episode.title.id), move, { focused(episode) }, { open(episode) },
                     Modifier.size(106.dp, 60.dp).then(selectedBorder).onFocusChanged { hasFocus = it.isFocused }
                         .semantics { contentDescription = label },
+                    onLongClick = { options(episode) },
                     fill = panel,
                 ) {
                     Box(Modifier.fillMaxSize()) {
@@ -803,17 +806,20 @@ internal fun MediaDialog(
 ) {
     val target = initial.coerceIn(0, (options.size - 1).coerceAtLeast(0))
     val list = rememberLazyListState(initialFirstVisibleItemIndex = target)
+    var focusedAction by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.widthIn(max = 510.dp).fillMaxWidth(.72f).heightIn(max = 425.dp)
-                .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(22.dp),
+                .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(22.dp)
+                .guardDialogSelection { focusedAction },
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(title, fontSize = 25.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, fontSize = 25.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
             message?.let { Text(it, color = secondary, fontSize = 17.sp) }
             LazyColumn(state = list, verticalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(4.dp)) {
                 items(options.size) { i ->
-                    Action(options[i], { select(i) }, "dialog/$i", FocusMove("dialog/$target", 0), {}, Modifier.fillMaxWidth())
+                    Action(options[i], { select(i) }, "dialog/$i", FocusMove("dialog/$target", 0),
+                        { focusedAction = it }, Modifier.fillMaxWidth())
                 }
             }
         }

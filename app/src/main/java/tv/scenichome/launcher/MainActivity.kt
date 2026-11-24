@@ -1,5 +1,6 @@
 package tv.scenichome.launcher
 
+import android.app.role.RoleManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -16,6 +17,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -38,6 +40,12 @@ internal data class TvApp(
 class MainActivity : ComponentActivity() {
     internal val media by lazy { MediaStore(applicationContext) }
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
+    private val requestHomeRole = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (it.resultCode == RESULT_OK) {
+            refreshHomeRoute()
+            showNotice(homeStatus)
+        }
+    }
     private var updateApps: Job? = null
     private var homeLaunches by mutableIntStateOf(0)
 
@@ -53,6 +61,10 @@ class MainActivity : ComponentActivity() {
         private set
     internal var notice by mutableStateOf<String?>(null)
         private set
+    internal var homeStatus by mutableStateOf("")
+        private set
+    internal var keepHomeOnBack by mutableStateOf(false)
+        private set
 
     internal var subtitlePreference: String?
         get() = prefs.getString("subtitle_preference", null)
@@ -67,6 +79,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
             homeLaunches++
         }
@@ -74,6 +87,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshHomeRoute()
         foreground = true
         refreshApps()
     }
@@ -163,6 +177,39 @@ class MainActivity : ComponentActivity() {
 
     internal fun tvSettings() {
         if (!send(Intent(Settings.ACTION_SETTINGS))) showNotice("TV settings couldn't be opened.")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun refreshHomeRoute() {
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val target = packageManager.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY)
+        val opensHere = target?.activityInfo?.packageName == packageName
+        val selected = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_HOME) == true
+        val launchedForHome = intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)
+        keepHomeOnBack = opensHere || selected || launchedForHome
+        val destination = target?.activityInfo?.applicationInfo
+        val label = when (destination?.packageName) {
+            null, "android" -> null
+            "com.google.android.apps.tv.launcherx" -> "Google TV"
+            else -> destination.loadLabel(packageManager).toString()
+        }
+        homeStatus = homeRouteDescription(opensHere, selected, label)
+    }
+
+    internal fun defaultHomeSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roles = getSystemService(RoleManager::class.java)
+            if (roles?.isRoleAvailable(RoleManager.ROLE_HOME) == true && !roles.isRoleHeld(RoleManager.ROLE_HOME)) {
+                val requested = runCatching {
+                    requestHomeRole.launch(roles.createRequestRoleIntent(RoleManager.ROLE_HOME))
+                }
+                if (requested.isSuccess) return
+            }
+        }
+        if (!send(Intent(Settings.ACTION_HOME_SETTINGS))) {
+            showNotice("This TV doesn't offer a Home app picker. $homeStatus")
+        }
     }
 
     internal fun homeButtonSettings() {

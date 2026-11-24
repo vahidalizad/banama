@@ -31,6 +31,7 @@ private data class LocalProgress(
     val position: WatchPosition,
     val furthest: EpisodeNumber,
     val serverAtSave: WatchPosition?,
+    val watchedAt: Long,
 )
 
 private fun WatchPosition.toJson() = JSONObject().put("season", episode.season).put("episode", episode.episode)
@@ -67,11 +68,11 @@ private class NamaSession(context: Context) {
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val data = cipher.doFinal(value.toByteArray())
         val encrypted = listOf(cipher.iv, data).joinToString(".") { Base64.encodeToString(it, Base64.NO_WRAP) }
-        check(prefs.edit().putString("session", encrypted).remove("progress").commit())
+        check(prefs.edit().putString("session", encrypted).remove("progress").remove("hiddenHeroTitles").commit())
     }
 
     fun clear() {
-        check(prefs.edit().remove("session").remove("progress").commit())
+        check(prefs.edit().remove("session").remove("progress").remove("hiddenHeroTitles").commit())
     }
 
     fun progress(): Map<Int, LocalProgress> = runCatching {
@@ -83,18 +84,23 @@ private class NamaSession(context: Context) {
                 item.getJSONObject("position").toPosition(),
                 EpisodeNumber(item.optInt("furthestSeason"), item.optInt("furthestEpisode")),
                 item.optJSONObject("serverAtSave")?.toPosition(),
+                item.optLong("watchedAt"),
             )
         }.toMap()
     }.getOrDefault(emptyMap())
 
-    fun saveProgress(progress: Map<Int, LocalProgress>) {
+    fun hiddenHeroTitles(): Set<Int> = prefs.getStringSet("hiddenHeroTitles", null).orEmpty()
+        .mapNotNull(String::toIntOrNull).toSet()
+
+    fun saveProgress(progress: Map<Int, LocalProgress>, hiddenHeroTitles: Set<Int>) {
         val saved = JSONObject()
         progress.forEach { (id, value) ->
             saved.put(id.toString(), JSONObject().put("position", value.position.toJson())
                 .put("furthestSeason", value.furthest.season).put("furthestEpisode", value.furthest.episode)
-                .put("serverAtSave", value.serverAtSave?.toJson()))
+                .put("serverAtSave", value.serverAtSave?.toJson()).put("watchedAt", value.watchedAt))
         }
-        prefs.edit().putString("progress", saved.toString()).apply()
+        prefs.edit().putString("progress", saved.toString())
+            .putStringSet("hiddenHeroTitles", hiddenHeroTitles.map(Int::toString).toSet()).apply()
     }
 }
 
@@ -182,14 +188,20 @@ internal class MediaStore(context: Context) {
     private var lists by mutableStateOf<Map<String, Set<Int>>>(emptyMap())
     private var history by mutableStateOf<Map<Int, WatchedTitle>>(emptyMap())
     private var localProgress by mutableStateOf<Map<Int, LocalProgress>>(emptyMap())
+    private var hiddenHeroTitles by mutableStateOf<Set<Int>>(emptySet())
     private var streamProgress by mutableStateOf<Map<Int, WatchPosition?>>(emptyMap())
     private var seriesEpisodes by mutableStateOf<Map<Int, List<UpcomingEpisode>>>(emptyMap())
 
     private suspend fun initialize() = sessionLock.withLock {
         if (initialized) return@withLock
-        val (savedToken, progress) = withContext(Dispatchers.IO) { session.read() to session.progress() }
+        val (savedToken, progress, hidden) = withContext(Dispatchers.IO) {
+            Triple(session.read(), session.progress(), session.hiddenHeroTitles())
+        }
         token = savedToken
-        if (savedToken != null) localProgress = progress
+        if (savedToken != null) {
+            localProgress = progress
+            hiddenHeroTitles = hidden
+        }
         connected = token != null
         initialized = true
     }
@@ -334,6 +346,7 @@ internal class MediaStore(context: Context) {
         lists = emptyMap()
         history = emptyMap()
         localProgress = emptyMap()
+        hiddenHeroTitles = emptySet()
         streamProgress = emptyMap()
         seriesEpisodes = emptyMap()
         artwork.clear()
@@ -464,14 +477,29 @@ internal class MediaStore(context: Context) {
     private fun watchedThrough(id: Int): EpisodeNumber? =
         listOfNotNull(serverPosition(id)?.episode, localProgress[id]?.furthest).maxOrNull()
 
-    val upcoming: List<UpcomingEpisode>
+    private val upcoming: List<UpcomingEpisode>
         get() {
             val titles = watchlist.map(MediaTitle::id) + seriesEpisodes.keys.filter { has("watchlist", it) }
             return titles.distinct().mapNotNull { seriesEpisodes[it]?.nextAfter(watchedThrough(it)) }
         }
 
-    val resumeEpisodes: List<UpcomingEpisode>
+    private val resumeEpisodes: List<UpcomingEpisode>
         get() = history.values.map { UpcomingEpisode(it.title, lastPlayed(it.title.id)?.episode ?: it.position.episode) }
+
+    val heroEpisodes: List<UpcomingEpisode>
+        get() = orderedHeroEpisodes(resumeEpisodes, upcoming, localProgress.mapValues { it.value.watchedAt }, hiddenHeroTitles)
+
+    suspend fun hideHeroTitle(titleId: Int, revision: Int) = sessionLock.withLock {
+        if (token == null || revision != accountRevision) return@withLock
+        hiddenHeroTitles = hiddenHeroTitles + titleId
+        saveLocalProgress()
+    }
+
+    private suspend fun saveLocalProgress() {
+        val progress = localProgress
+        val hidden = hiddenHeroTitles
+        withContext(NonCancellable + Dispatchers.IO) { session.saveProgress(progress, hidden) }
+    }
 
     suspend fun refreshUpcoming() = coroutineScope {
         val current = token ?: return@coroutineScope
@@ -539,9 +567,9 @@ internal class MediaStore(context: Context) {
             val sessionToken = token ?: return
             val position = WatchPosition(episode.key, timeMs)
             val furthest = watchedThrough(titleId)?.let { maxOf(it, episode.key) } ?: episode.key
-            localProgress = localProgress + (titleId to LocalProgress(position, furthest, serverPosition(titleId)))
-            val snapshot = localProgress
-            withContext(NonCancellable + Dispatchers.IO) { session.saveProgress(snapshot) }
+            localProgress = localProgress + (titleId to LocalProgress(position, furthest, serverPosition(titleId), System.currentTimeMillis()))
+            hiddenHeroTitles = hiddenHeroTitles - titleId
+            saveLocalProgress()
             sessionToken
         }
         if (report && userId > 0 && episode.fileId > 0 && episode.progressToken.isNotBlank()) {

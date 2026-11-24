@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+./gradlew --no-daemon :app:assembleRelease
+
+apk=app/build/outputs/apk/release/app-release.apk
+tools="$ANDROID_HOME/build-tools/35.0.0"
+"$tools/apksigner" verify "$apk"
+badging=$("$tools/aapt" dump badging "$apk")
+case "$badging" in
+    *"provides-component:'accessibility'"*|*"application-debuggable"*)
+        echo "The shareable APK contains the developer Home redirect or is debuggable." >&2
+        exit 1 ;;
+esac
+
+mkdir -p artifacts
+temp=$(mktemp artifacts/.BananaLauncher.XXXXXX)
+trap 'rm -f "$temp"' EXIT
+install -m 644 "$apk" "$temp"
+mv -f "$temp" artifacts/BananaLauncher.apk
+echo "Ready to send: artifacts/BananaLauncher.apk"

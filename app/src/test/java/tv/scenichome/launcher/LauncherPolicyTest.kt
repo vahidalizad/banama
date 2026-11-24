@@ -8,14 +8,13 @@ import org.junit.Test
 
 class LauncherPolicyTest {
     @Test
-    fun redirectOnlyTheGoogleTvHomeActivity() {
-        val stock = "com.google.android.apps.tv.launcherx"
-        val home = "$stock.home.HomeActivity"
-        assertTrue(isGoogleTvHome(stock, StringBuilder(home)))
-        assertFalse(isGoogleTvHome(stock, "$stock.settings.SettingsActivity"))
-        assertFalse(isGoogleTvHome("com.android.tv.settings", home))
-        assertFalse(isGoogleTvHome(stock, null))
-        assertFalse(isGoogleTvHome(null, home))
+    fun homeStatusUsesTheActualDestinationEvenWhenTheRoleIsHeld() {
+        assertEquals("BananaLauncher is selected. This TV sends Home to Google TV.",
+            homeRouteDescription(opensHere = false, roleHeld = true, destination = "Google TV"))
+        assertEquals("Choose a default Home app in TV settings.",
+            homeRouteDescription(opensHere = false, roleHeld = true, destination = null))
+        assertEquals("Android opens BananaLauncher for Home.",
+            homeRouteDescription(opensHere = true, roleHeld = false, destination = "BananaLauncher"))
     }
 
     @Test

@@ -5,6 +5,12 @@ import android.content.Intent
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 
+private const val GOOGLE_TV_PACKAGE = "com.google.android.apps.tv.launcherx"
+
+internal fun isGoogleTvHome(packageName: CharSequence?, className: CharSequence?): Boolean =
+    packageName?.toString() == GOOGLE_TV_PACKAGE &&
+        className?.toString() == "$GOOGLE_TV_PACKAGE.home.HomeActivity"
+
 class HomeRedirectService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()

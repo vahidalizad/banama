@@ -2,11 +2,12 @@ package tv.scenichome.launcher
 
 internal const val MAX_FAVORITES = 4
 
-private const val GOOGLE_TV_PACKAGE = "com.google.android.apps.tv.launcherx"
-
-internal fun isGoogleTvHome(packageName: CharSequence?, className: CharSequence?): Boolean =
-    packageName?.toString() == GOOGLE_TV_PACKAGE &&
-        className?.toString() == "$GOOGLE_TV_PACKAGE.home.HomeActivity"
+internal fun homeRouteDescription(opensHere: Boolean, roleHeld: Boolean, destination: String?): String = when {
+    opensHere -> "Android opens BananaLauncher for Home."
+    destination == null -> "Choose a default Home app in TV settings."
+    roleHeld -> "BananaLauncher is selected. This TV sends Home to $destination."
+    else -> "Android opens $destination for Home."
+}
 
 private val homeControlPackages = setOf("com.android.tv.settings", "com.android.settings", "com.android.vending")
 

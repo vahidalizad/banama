@@ -94,7 +94,7 @@ private data class VideoQuality(val source: Source, val height: Int = 0) {
     }
 }
 
-private const val SEEK_JUMP = 30_000L
+private const val SEEK_JUMP = 10_000L
 private const val SUBTITLE_TEXT_FRACTION = .045f
 
 internal fun subtitleBottomInsets(viewHeight: Int, subtitleHeight: Int, overlayHeight: Int, gap: Int): Pair<Int, Float> {
@@ -584,7 +584,7 @@ internal fun MediaPlayerScreen(
                     val direction = if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
                     val scrub = scrubMs
                     if (scrub == null) seekTo(elapsedMs + direction * SEEK_JUMP)
-                    else scrubMs = (scrub + direction * 10_000L).coerceIn(0, durationMs)
+                    else scrubMs = (scrub + direction * SEEK_JUMP).coerceIn(0, durationMs)
                     if (!controls) {
                         selected = "player/timeline"
                         controls = true

@@ -184,6 +184,26 @@ class MediaCatalogTest {
     }
 
     @Test
+    fun heroOrdersNextEpisodesAndResumesByWatchActivityAndHidesWholeTitles() {
+        fun card(id: Int, number: Int): UpcomingEpisode {
+            val title = JSONObject("""{"id":$id,"title":{"english":"Series $id"}}""").mediaTitle()!!
+            return UpcomingEpisode(title, EpisodeNumber(1, number))
+        }
+        val history = listOf(card(2, 1), card(1, 3), card(3, 5))
+        val upcoming = listOf(card(5, 2), card(1, 4), card(2, 2), card(4, 3))
+        val playedOnTv = mapOf(4 to 200L, 3 to 100L, 1 to 0L)
+
+        assertEquals(
+            listOf(card(4, 3), card(3, 5), card(2, 2), card(1, 4), card(5, 2)),
+            orderedHeroEpisodes(history, upcoming, playedOnTv, emptySet()),
+        )
+        assertEquals(
+            listOf(card(4, 3), card(3, 5), card(2, 2)),
+            orderedHeroEpisodes(history, upcoming, playedOnTv, setOf(1, 5)),
+        )
+    }
+
+    @Test
     fun seriesDetailsKeepCertificationCountriesAndCastRoles() {
         val title = JSONObject("""
             {"id":22,"title":{"english":"Series"},"info":{"age":"TV-MA","year":2025,"time":{"default":50}},

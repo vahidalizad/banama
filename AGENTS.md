@@ -18,6 +18,6 @@ Build a sideloaded Android TV app in Kotlin with the Gradle wrapper and a stable
 
 - Scope changes to this app. Keep ADB on the private LAN, the ADB server inside Docker, and pairing codes and keys out of source and logs.
 - Run `adb disconnect <connect-ip:port>` and switch Wireless debugging off after testing. Verify the port stops accepting connections while the TV stays online. Removing the app in **Apps** settings also removes its local data.
-- To retire the setup, forget the paired client on the TV. Remove the builder with `docker buildx rm tv-android`, the image with `docker image rm tv-android-dev`, and the volume with `docker volume rm tv-android-home`. Save the debug signing key privately before removing the volume if the installed app will need updates.
+- To retire the setup, forget the paired client on the TV. Before removing the volume, privately back up `/home/android/.android/bananalauncher/` (release key and password) for shared APK updates and the debug signing key for development updates. Remove the builder with `docker buildx rm tv-android`, the image with `docker image rm tv-android-dev`, and the volume with `docker volume rm tv-android-home`.
 
 [Android TV app setup](https://developer.android.com/training/tv/start/start) · [Android wireless ADB](https://developer.android.com/tools/adb#connect-to-a-device-over-wi-fi) · [Docker Desktop networking](https://docs.docker.com/desktop/features/networking/) · [CleanYour.TV safety FAQ](https://cleanyour.tv/faq)

@@ -23,10 +23,26 @@ android {
         applicationId = "tv.scenichome.launcher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.1.2"
+        versionCode = 15
+        versionName = "1.1.5"
         buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
         buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))
+    }
+
+    signingConfigs {
+        create("distribution") {
+            val dir = File(System.getProperty("user.home"), ".android/bananalauncher")
+            storeFile = dir.resolve("release.p12")
+            storePassword = dir.resolve("password").takeIf { it.isFile }?.readText()?.trim()
+            keyAlias = "bananalauncher"
+            keyPassword = storePassword
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("distribution")
+        }
     }
 
     compileOptions {

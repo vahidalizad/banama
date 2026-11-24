@@ -120,6 +120,18 @@ internal fun PlaybackCatalog.seriesEpisodes(title: MediaTitle): List<UpcomingEpi
 internal fun List<UpcomingEpisode>.nextAfter(watched: EpisodeNumber?): UpcomingEpisode? =
     watched?.let { previous -> firstOrNull { it.episode > previous } }
 
+internal fun orderedHeroEpisodes(
+    history: List<UpcomingEpisode>,
+    upcoming: List<UpcomingEpisode>,
+    watchedAt: Map<Int, Long>,
+    hidden: Set<Int>,
+): List<UpcomingEpisode> {
+    // A next episode replaces the resume card without moving it out of watch-history order.
+    return (history + upcoming).associateBy { it.title.id }.values
+        .filterNot { it.title.id in hidden }
+        .sortedByDescending { watchedAt[it.title.id] ?: 0L }
+}
+
 internal fun isUhd(width: Int, height: Int) = width >= 3840 || height >= 2160
 
 internal fun browseParameters(

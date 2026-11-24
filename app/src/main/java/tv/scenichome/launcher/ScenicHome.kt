@@ -216,7 +216,6 @@ private fun HomeScreen(
     var settingsMenu by remember { mutableStateOf(false) }
     var lastFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var lastDockFocus by rememberSaveable { mutableStateOf<String?>(null) }
-    var heroTitleId by rememberSaveable { mutableIntStateOf(0) }
     var suggestedCover by rememberSaveable { mutableStateOf<String?>(null) }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
@@ -228,6 +227,8 @@ private fun HomeScreen(
         dockApps(apps.map { it.pkg }, activity.pinned, activity.recent).mapNotNull(byId::get)
     }
     val media = activity.media
+    val accountRevision = media.accountRevision
+    var heroMenu by remember(accountRevision) { mutableStateOf<UpcomingEpisode?>(null) }
     val scenes = buildList {
         for (library in MediaLibrary.entries) {
             if (library == MediaLibrary.WATCHLIST || media.connected) {
@@ -236,9 +237,10 @@ private fun HomeScreen(
         }
         if (media.suggestions.isNotEmpty()) add(Triple("suggested", "Suggested", media.suggestions))
     }
-    val upcoming = if (appsOpen) emptyList() else
-        (media.upcoming + media.resumeEpisodes).distinctBy { it.title.id }
-    val hero = upcoming.firstOrNull { it.title.id == heroTitleId } ?: upcoming.firstOrNull()
+    val upcoming = if (appsOpen) emptyList() else media.heroEpisodes
+    val latest = upcoming.firstOrNull()
+    var heroTitleId by remember(latest?.title?.id, accountRevision) { mutableIntStateOf(0) }
+    val hero = upcoming.firstOrNull { it.title.id == heroTitleId || heroKey(it.title.id) == lastFocus } ?: latest
     val stageLoading = !appsOpen && hero == null && media.configured &&
         (!media.homeLoaded || (media.connected && !media.upcomingLoaded))
     val useSuggested = !appsOpen && !stageLoading && hero == null
@@ -255,7 +257,7 @@ private fun HomeScreen(
         }
     }
     val hasStage = !appsOpen && (stageLoading || hero != null || covers.isNotEmpty())
-    val dialogOpen = appMenu != null || settingsMenu
+    val dialogOpen = appMenu != null || settingsMenu || heroMenu != null
     val dockTargets = dock.map(::dockKey) + "home/apps"
     val homeTargets = dockTargets + listOf("home/search", "home/play", "home/settings") +
         upcoming.map { heroKey(it.title.id) } +
@@ -277,7 +279,10 @@ private fun HomeScreen(
     }
     LaunchedEffect(activity.foreground, activity.appsLoaded, appsOpen, dialogOpen, focusLost) {
         if (!activity.foreground || !activity.appsLoaded || dialogOpen) return@LaunchedEffect
-        val target = focusAfterRefresh(lastFocus, targets) ?: return@LaunchedEffect
+        val preferred = if (focusLost && lastFocus?.startsWith("home/hero/") == true) {
+            hero?.let { heroKey(it.title.id) } ?: lastDockFocus
+        } else lastFocus
+        val target = focusAfterRefresh(preferred, targets) ?: return@LaunchedEffect
         snapshotFlow { grid.layoutInfo.totalItemsCount }.first { it > 0 }
         val group = target.split('/').getOrNull(1)
         val index = when {
@@ -304,7 +309,7 @@ private fun HomeScreen(
         lastFocus = "home/apps"
         appsOpen = false
     }
-    BackHandler(!appsOpen && !dialogOpen && grid.canScrollBackward) {
+    BackHandler(!appsOpen && !dialogOpen && (grid.canScrollBackward || activity.keepHomeOnBack)) {
         scope.launch {
             grid.scrollToItem(0)
             move = FocusMove(dock.firstOrNull()?.let(::dockKey) ?: "home/apps", ++sequence)
@@ -401,6 +406,8 @@ private fun HomeScreen(
                                 onFocused(heroKey(heroTitleId))
                             },
                             open = onHero,
+                            options = { heroMenu = it },
+                            showOptionsHint = lastFocus == heroKey(hero.title.id),
                         ) else if (stageLoading) {
                             Text("Loading titles…", color = secondary, fontSize = 17.sp,
                                 modifier = Modifier.padding(bottom = 12.dp).progressSemantics())
@@ -469,16 +476,31 @@ private fun HomeScreen(
     }
 
     if (settingsMenu) {
-        OptionsDialog("Launcher settings", null, buildList {
+        OptionsDialog("Launcher settings", activity.homeStatus, buildList {
             val connectLabel = if (media.connected) "Pair again" else "Connect 30nama"
             add(Setting("connect", connectLabel, run = onConnect))
             if (media.connected) add(Setting("disconnect", "Disconnect 30nama") {
                 scope.launch { media.disconnect() }
             })
-            add(Setting("home-button", "Remote Home button", run = activity::homeButtonSettings))
+            add(Setting("default-home", "Default Home app", run = activity::defaultHomeSettings))
+            if (BuildConfig.DEBUG) {
+                add(Setting("home-button", "Remote Home button", run = activity::homeButtonSettings))
+            }
         }) { settingsMenu = false }
     }
     appMenu?.let { app -> AppMenu(activity, app) { appMenu = null } }
+    heroMenu?.let { episode ->
+        MediaDialog(
+            title = episode.title.name,
+            message = "Hide this title from Continue Watching. Your progress is saved.",
+            options = listOf("I don’t watch this anymore", "Cancel"),
+            initial = 1,
+            close = { heroMenu = null },
+        ) { choice ->
+            heroMenu = null
+            if (choice == 0) scope.launch { media.hideHeroTitle(episode.title.id, accountRevision) }
+        }
+    }
 }
 
 @Composable
@@ -752,7 +774,6 @@ private fun AppMenu(activity: MainActivity, app: TvApp, close: () -> Unit) {
 
 @Composable
 private fun OptionsDialog(title: String, detail: String?, items: List<Setting>, close: () -> Unit) {
-    val press = remember { MenuSelectPress() }
     var focusedAction by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
@@ -760,16 +781,7 @@ private fun OptionsDialog(title: String, detail: String?, items: List<Setting>, 
                 .background(panel, dockShape)
                 .border(1.dp, edge, dockShape)
                 .padding(22.dp)
-                .onPreviewKeyEvent { event ->
-                    val native = event.nativeKeyEvent
-                    when (native.keyCode) {
-                        // The menu may receive the repeat or release of the hold that opened it.
-                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
-                            press.consume(native.keyCode, native.action == KeyEvent.ACTION_DOWN, native.repeatCount, focusedAction) ||
-                                native.isCanceled
-                        else -> false
-                    }
-                },
+                .guardDialogSelection { focusedAction },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(title, color = foreground, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
@@ -784,6 +796,20 @@ private fun OptionsDialog(title: String, detail: String?, items: List<Setting>, 
                     }, item.key, FocusMove(items.first().key, 0), { focusedAction = it }, Modifier.fillMaxWidth(), item.enabled)
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun Modifier.guardDialogSelection(focusedAction: () -> String?): Modifier {
+    val press = remember { MenuSelectPress() }
+    return onPreviewKeyEvent { event ->
+        val key = event.nativeKeyEvent
+        when (key.keyCode) {
+            // The dialog may receive the repeat or release of the hold that opened it.
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                press.consume(key.keyCode, key.action == KeyEvent.ACTION_DOWN, key.repeatCount, focusedAction()) || key.isCanceled
+            else -> false
         }
     }
 }

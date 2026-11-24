@@ -2,8 +2,6 @@
 <resources>
     <string name="app_name">BananaLauncher</string>
     <string name="app_author">B4Banana</string>
-    <string name="home_redirect_label">BananaLauncher Home redirect</string>
-    <string name="home_redirect_description">Open BananaLauncher when the Google TV Home screen appears.</string>
     <style name="Theme.BananaLauncher" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">#16131D</item>
         <item name="android:colorAccent">#F7BF2E</item>
