@@ -55,6 +55,15 @@ adb -s "$TV" shell am start -a android.settings.HOME_SETTINGS
 
 Press **Home** on the remote to check the selection. Choose **Google TV** in the same picker to switch back on the TCL.
 
+If the remote still opens Google TV, hold **OK** on the gear in BananaLauncher and choose **Remote Home button**. In Accessibility, turn on **BananaLauncher Home redirect**. Press **Home** from another app to test it. The service also opens BananaLauncher once after each restart. Google TV may appear briefly as the redirect opens BananaLauncher. To reverse the redirect, turn off the same Accessibility service.
+
+On the TCL C89L, if the service stays enabled but stops working after a restart, allow TCL auto-start for BananaLauncher from the paired ADB session and restart again.
+
+```sh
+adb -s "$TV" shell cmd appops set tv.scenichome.launcher AUTO_START allow
+adb -s "$TV" shell cmd appops write-settings
+```
+
 ## Update
 
 During a dependency review, check AndroidX and the pinned SDK toolchain for relevant changes. Rebuild and run the tests in Docker, then install over the previous APK using the same signing volume. Check remote focus, Google Play, and the Home hero on the TCL.

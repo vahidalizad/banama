@@ -2,6 +2,12 @@ package tv.scenichome.launcher
 
 internal const val MAX_FAVORITES = 4
 
+private const val GOOGLE_TV_PACKAGE = "com.google.android.apps.tv.launcherx"
+
+internal fun isGoogleTvHome(packageName: CharSequence?, className: CharSequence?): Boolean =
+    packageName?.toString() == GOOGLE_TV_PACKAGE &&
+        className?.toString() == "$GOOGLE_TV_PACKAGE.home.HomeActivity"
+
 private val homeControlPackages = setOf("com.android.tv.settings", "com.android.settings", "com.android.vending")
 
 internal fun dockApps(installed: List<String>, pinned: List<String>, recent: List<String>): List<String> {

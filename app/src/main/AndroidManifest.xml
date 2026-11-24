@@ -23,6 +23,18 @@
         <meta-data
             android:name="tv.scenichome.launcher.AUTHOR"
             android:value="@string/app_author" />
+        <service
+            android:name=".HomeRedirectService"
+            android:exported="true"
+            android:label="@string/home_redirect_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/home_redirect_service" />
+        </service>
         <activity
             android:name=".MainActivity"
             android:banner="@drawable/banana_banner"

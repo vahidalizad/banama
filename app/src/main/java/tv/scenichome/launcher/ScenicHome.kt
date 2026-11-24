@@ -213,7 +213,7 @@ private fun HomeScreen(
     var appsOpen by rememberSaveable { mutableStateOf(false) }
     val grid = if (appsOpen) appGrid else homeGrid
     var appMenu by remember { mutableStateOf<TvApp?>(null) }
-    var connectionMenu by remember { mutableStateOf(false) }
+    var settingsMenu by remember { mutableStateOf(false) }
     var lastFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var lastDockFocus by rememberSaveable { mutableStateOf<String?>(null) }
     var heroTitleId by rememberSaveable { mutableIntStateOf(0) }
@@ -255,7 +255,7 @@ private fun HomeScreen(
         }
     }
     val hasStage = !appsOpen && (stageLoading || hero != null || covers.isNotEmpty())
-    val dialogOpen = appMenu != null || connectionMenu
+    val dialogOpen = appMenu != null || settingsMenu
     val dockTargets = dock.map(::dockKey) + "home/apps"
     val homeTargets = dockTargets + listOf("home/search", "home/play", "home/settings") +
         upcoming.map { heroKey(it.title.id) } +
@@ -464,18 +464,19 @@ private fun HomeScreen(
             }
             HomeAction("home/play", "Get apps", R.drawable.home_play, move, onFocused, activity::getApps)
             HomeAction("home/settings", "TV settings", R.drawable.home_settings, move, onFocused,
-                activity::tvSettings, onLongClick = { connectionMenu = true })
+                activity::tvSettings, onLongClick = { settingsMenu = true })
         }
     }
 
-    if (connectionMenu) {
-        OptionsDialog("30nama connection", null, buildList {
+    if (settingsMenu) {
+        OptionsDialog("Launcher settings", null, buildList {
             val connectLabel = if (media.connected) "Pair again" else "Connect 30nama"
             add(Setting("connect", connectLabel, run = onConnect))
             if (media.connected) add(Setting("disconnect", "Disconnect 30nama") {
                 scope.launch { media.disconnect() }
             })
-        }) { connectionMenu = false }
+            add(Setting("home-button", "Remote Home button", run = activity::homeButtonSettings))
+        }) { settingsMenu = false }
     }
     appMenu?.let { app -> AppMenu(activity, app) { appMenu = null } }
 }

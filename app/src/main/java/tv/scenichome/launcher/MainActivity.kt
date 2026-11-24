@@ -165,6 +165,12 @@ class MainActivity : ComponentActivity() {
         if (!send(Intent(Settings.ACTION_SETTINGS))) showNotice("TV settings couldn't be opened.")
     }
 
+    internal fun homeButtonSettings() {
+        if (!send(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))) {
+            showNotice("Open System → Accessibility in TV settings.")
+        }
+    }
+
     internal fun searchYouTube(query: String) {
         val url = Uri.parse("https://www.youtube.com/results").buildUpon()
             .appendQueryParameter("search_query", query).build()

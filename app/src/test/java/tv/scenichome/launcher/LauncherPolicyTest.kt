@@ -8,6 +8,17 @@ import org.junit.Test
 
 class LauncherPolicyTest {
     @Test
+    fun redirectOnlyTheGoogleTvHomeActivity() {
+        val stock = "com.google.android.apps.tv.launcherx"
+        val home = "$stock.home.HomeActivity"
+        assertTrue(isGoogleTvHome(stock, StringBuilder(home)))
+        assertFalse(isGoogleTvHome(stock, "$stock.settings.SettingsActivity"))
+        assertFalse(isGoogleTvHome("com.android.tv.settings", home))
+        assertFalse(isGoogleTvHome(stock, null))
+        assertFalse(isGoogleTvHome(null, home))
+    }
+
+    @Test
     fun dockAndFocusRecoverWhenAnAppDisappears() {
         val dock = dockApps(
             listOf("a", "b", "c", "d", "e", "f", "g"),
