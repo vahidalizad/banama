@@ -533,7 +533,9 @@ internal class MediaArtwork {
         override fun sizeOf(key: Pair<String, Int>, value: Bitmap): Int = value.allocationByteCount
     }
 
-    suspend fun image(url: String?, size: Int): Bitmap? = withContext(Dispatchers.IO) {
+    fun cached(url: String, size: Int): Bitmap? = cache.get(url to size)
+
+    suspend fun image(url: String, size: Int): Bitmap? = withContext(Dispatchers.IO) {
         val uri = httpsUri(url) ?: return@withContext null
         val key = uri.toString() to size
         cache.get(key) ?: runCatching {

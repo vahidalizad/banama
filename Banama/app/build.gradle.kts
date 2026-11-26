@@ -24,8 +24,8 @@ android {
         applicationId = "tv.scenichome.launcher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.1.16"
+        versionCode = 27
+        versionName = "1.1.17"
         buildConfigField("boolean", "BUNDLED_HEVC", bundledHevc.toString())
         buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
         buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))
