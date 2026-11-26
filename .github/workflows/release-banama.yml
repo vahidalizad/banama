@@ -1,0 +1,57 @@
+name: Release Banama
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Banama/**'
+      - '*'
+      - '.github/workflows/release-banama.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    environment: android-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build Android toolchain
+        run: docker buildx build --platform linux/amd64 --load -t tv-android-dev .
+      - name: Restore distribution signing files
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+        run: |
+          docker run --rm --mount type=volume,source=tv-android-home,target=/home/android \
+            --env RELEASE_KEYSTORE --env RELEASE_PASSWORD tv-android-dev sh -eu -c '
+              umask 077
+              dir="$HOME/.android/bananalauncher"
+              mkdir -p "$dir"
+              printf %s "${RELEASE_KEYSTORE:?Set ANDROID_RELEASE_KEYSTORE_BASE64}" | base64 -d > "$dir/release.p12"
+              printf %s "${RELEASE_PASSWORD:?Set ANDROID_RELEASE_KEYSTORE_PASSWORD}" > "$dir/password"
+            '
+      - name: Build signed Banama APK
+        env:
+          BANAMA_CLIENT_KEY: ${{ secrets.BANAMA_CLIENT_KEY }}
+        run: |
+          printf 'thirtyNama.clientKey=%s\n' "${BANAMA_CLIENT_KEY:?Set BANAMA_CLIENT_KEY}" > Banama/local.properties
+          ./dev Banama ./release-apk
+      - name: Publish Banama release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="banama-$GITHUB_SHA"
+          apk=Banama/artifacts/Banama.apk
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" == true ]]; then
+              gh release upload "$tag" "$apk" --clobber
+              gh release edit "$tag" --draft=false
+            fi
+          else
+            gh release create "$tag" "$apk" --target "$GITHUB_SHA" \
+              --title "Banama (${GITHUB_SHA::7})" --notes "Built from $GITHUB_SHA."
+          fi
