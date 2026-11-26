@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -188,7 +189,7 @@ private fun HomeScreen(
     var profileOpen by remember { mutableStateOf(false) }
     var heroMenu by remember(accountRevision) { mutableStateOf<UpcomingEpisode?>(null) }
     var lastFocus by rememberSaveable { mutableStateOf("") }
-    var currentFocus by remember { mutableStateOf("home/search") }
+    var currentFocus by remember { mutableStateOf<String?>(null) }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
     var revealTarget by remember { mutableStateOf<String?>(null) }
@@ -241,9 +242,16 @@ private fun HomeScreen(
     val targets = focusRows.flatten()
     val dialogOpen = profileOpen || heroMenu != null
     val focusLost = lastFocus !in targets
+    val restoringCard = !focusLost && lastFocus !in headerTargets && currentFocus != lastFocus
     val focusAtTop = lastFocus in headerTargets || lastFocus.startsWith("home/hero/")
     val initialTarget = initialHomeFocus(latest?.title?.id, media.suggestions.firstOrNull()?.id,
         media.configured && media.connected && !media.historyLoaded, media.configured && !media.homeLoaded)
+    fun requestFocus(target: String) {
+        move = if (target == currentFocus) {
+            lastFocus = target
+            null
+        } else FocusMove(target, ++sequence)
+    }
     LaunchedEffect(revealTarget, focusAtTop) {
         val target = revealTarget?.let { if (it in targets) it else "home/search" }
         val index = shelves.indexOfFirst { (key, _, _) -> target?.startsWith("home/$key/") == true } + 1
@@ -256,25 +264,31 @@ private fun HomeScreen(
             list.animateScrollToItem(0)
         }
         if (target != null) {
-            move = FocusMove(target, ++sequence)
+            requestFocus(target)
             revealTarget = null
         }
     }
     val recoveryTarget = initialTarget.takeIf { focusLost }
-    LaunchedEffect(activity.foreground, dialogOpen, focusLost, recoveryTarget) {
+    val requestedTargetMissing = move?.let { it.id !in targets } == true
+    LaunchedEffect(activity.foreground, dialogOpen, focusLost, recoveryTarget, requestedTargetMissing) {
         if (!activity.foreground || dialogOpen) return@LaunchedEffect
+        if (requestedTargetMissing) move = null
         val target = lastFocus.takeIf { !focusLost } ?: recoveryTarget ?: return@LaunchedEffect
         val group = target.split('/')[1]
         val index = shelves.indexOfFirst { it.first == group } + 1
         if (index > 0) {
             if (list.layoutInfo.visibleItemsInfo.none { it.index == index }) list.scrollToItem(index)
         }
-        move = FocusMove(target, ++sequence)
+        requestFocus(target)
     }
     val focused: (String) -> Unit = { id ->
         if (!dialogOpen) {
+            // Automatic focus on entry must not overwrite the saved target.
+            if (id == move?.id || (move == null && currentFocus == lastFocus)) {
+                lastFocus = id
+                move = null
+            }
             currentFocus = id
-            if (move != null || lastFocus.isNotEmpty()) lastFocus = id
         }
     }
 
@@ -286,7 +300,7 @@ private fun HomeScreen(
         }
         val firstPress = key.action == KeyEvent.ACTION_DOWN
         if (firstPress && lastFocus.isEmpty() && key.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_CENTER) {
-            lastFocus = currentFocus
+            currentFocus?.let { lastFocus = it }
         }
         if (key.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && firstPress) previewAbove = false
         val target = when {
@@ -360,7 +374,8 @@ private fun HomeScreen(
             listOf(Color(0xCB101010), Color(0x53101010), Color.Transparent),
         )))
         Row(
-            Modifier.fillMaxWidth().padding(start = 40.dp, end = 40.dp, top = 20.dp),
+            Modifier.fillMaxWidth().padding(start = 40.dp, end = 40.dp, top = 20.dp)
+                .focusProperties { canFocus = !restoringCard },
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
