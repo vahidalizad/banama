@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+abi=$1 arch=$2 target=$3
+shift 3
+prefix=/tmp/build-$abi
+mkdir -p "$prefix/ffmpeg" "/out/jni/$abi"
+cc=$(command -v "${target}26-clang")
+cxx=$(command -v "${target}26-clang++")
+cd "$prefix"
+cat >cross.ini <<CROSS
+[binaries]
+c = '$cc'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+nasm = 'nasm'
+[host_machine]
+system = 'android'
+cpu_family = '$arch'
+cpu = '$arch'
+endian = 'little'
+CROSS
+meson setup dav1d /src/dav1d --cross-file=cross.ini --buildtype=release --default-library=static \
+    --prefix="$prefix" --libdir=lib -Denable_tools=false -Denable_tests=false -Db_staticpic=true
+ninja -C dav1d -j4 install
+cd ffmpeg
+export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
+# Media3 handles the containers, network and subtitles. Only link the codecs used by the fallback.
+sh /src/ffmpeg/configure "$@" --prefix="$prefix" --target-os=android --arch="$arch" \
+    --cc="$cc" --cxx="$cxx" --ar=llvm-ar --ranlib=llvm-ranlib --nm=llvm-nm --strip=llvm-strip \
+    --enable-cross-compile --enable-pic --disable-autodetect --disable-everything --disable-programs \
+    --disable-doc --disable-debug --disable-network --disable-avdevice --disable-avformat --disable-avfilter \
+    --enable-libdav1d --pkg-config=pkg-config --pkg-config-flags=--static \
+    --enable-decoder=h264,hevc,libdav1d,mpegvideo,mpeg2video,vp8,vp9,aac,ac3,eac3,dca,truehd,mp3,vorbis,opus,flac,alac,amrnb,amrwb,pcm_mulaw,pcm_alaw
+make -j4 install >/dev/null
+jni=/src/nextlib/media3ext/src/main/cpp
+"$cxx" -std=c++17 -O2 -fPIC -shared -static-libstdc++ -I"$prefix/include" \
+    "$jni/ffmain.cpp" "$jni/ffcommon.cpp" "$jni/ffvideo.cpp" "$jni/ffaudio.cpp" \
+    -L"$prefix/lib" -lavcodec -lswscale -lswresample -lavutil -ldav1d -lz -ldl -lm -llog -landroid -latomic \
+    -Wl,--exclude-libs,ALL,--no-undefined,-z,max-page-size=16384 -o "/out/jni/$abi/libmedia3ext.so"
+llvm-strip --strip-unneeded "/out/jni/$abi/libmedia3ext.so"
+rm -rf "$prefix"

@@ -181,6 +181,8 @@ internal class MediaStore(context: Context) {
     private var loading by mutableStateOf(false)
     var homeLoaded by mutableStateOf(false)
         private set
+    var historyLoaded by mutableStateOf(false)
+        private set
     var accountRevision by mutableIntStateOf(0)
         private set
     var catalogRevision by mutableIntStateOf(0)
@@ -205,11 +207,6 @@ internal class MediaStore(context: Context) {
         connected = token != null
         initialized = true
     }
-
-    private fun JSONObject.readAccount(): MediaAccount = MediaAccount(
-        optJSONObject("user_expire")?.text("days")?.toIntOrNull(),
-        optBoolean("user_allowed_to_stream"), optBoolean("user_allowed_to_download"), optInt("user_id"),
-    )
 
     suspend fun refresh(home: Boolean, library: MediaLibrary? = null, force: Boolean = false): Long = refreshLock.withLock {
         initialize()
@@ -277,6 +274,7 @@ internal class MediaStore(context: Context) {
         }
         val currentAccount = user.await()
         if (current != token) return@coroutineScope
+        historyLoaded = true
         if ((currentAccount.exceptionOrNull() as? NamaFailure)?.rejectedSession == true) {
             forget(current)
             return@coroutineScope
@@ -345,6 +343,7 @@ internal class MediaStore(context: Context) {
         upcomingLoaded = false
         lists = emptyMap()
         history = emptyMap()
+        historyLoaded = false
         localProgress = emptyMap()
         hiddenHeroTitles = emptySet()
         streamProgress = emptyMap()
@@ -592,7 +591,7 @@ internal class MediaStore(context: Context) {
     }
 
     private suspend fun download(title: MediaTitle, current: String?, reuse: Boolean = false): List<DownloadVideo> {
-        val free = account?.download != true
+        val free = current == null || account?.download == false
         if (free && !title.freeDownload) return emptyList()
         suspend fun read() = api.read("download", current, mapOf(
             "post_id" to title.id.toString(), "free_download" to free.toString(),

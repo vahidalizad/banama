@@ -20,6 +20,8 @@ RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
     && unzip -oq /tmp/platform-tools.zip -d "$ANDROID_HOME" \
     && rm /tmp/platform-tools.zip \
     && adb version
+RUN sdkmanager --install 'platforms;android-36' >/dev/null
+RUN sdkmanager --install 'platforms;android-37.1' 'build-tools;37.0.0' >/dev/null
 RUN useradd --create-home --uid 1000 android
 USER android
 ENV HOME=/home/android

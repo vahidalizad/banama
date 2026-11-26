@@ -3,10 +3,10 @@ package tv.scenichome.home
 internal const val MAX_FAVORITES = 4
 
 internal fun homeRouteDescription(opensHere: Boolean, roleHeld: Boolean, destination: String?): String = when {
-    opensHere -> "Android opens BananaLauncher for Home."
+    opensHere -> "BananaLauncher is the default Home app."
     destination == null -> "Choose a default Home app in TV settings."
-    roleHeld -> "BananaLauncher is selected. This TV sends Home to $destination."
-    else -> "Android opens $destination for Home."
+    roleHeld -> "BananaLauncher holds the Home role. Android resolves Home to $destination."
+    else -> "$destination is the default Home app."
 }
 
 private val homeControlPackages = setOf("com.android.tv.settings", "com.android.settings", "com.android.vending")

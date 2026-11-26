@@ -52,9 +52,12 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
@@ -90,6 +93,7 @@ private val edge = Color(0xFF585858)
 private val dockShape = RoundedCornerShape(24.dp)
 private val tileShape = RoundedCornerShape(12.dp)
 private val glassTile = RoundedCornerShape(16.dp)
+private val mutedIcon = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(.2f) })
 private data class FocusMove(val id: String, val revision: Int)
 private data class Setting(
     val key: String,
@@ -219,8 +223,8 @@ private fun LauncherScreen(activity: MainActivity) {
             }
         } else {
             FavoritesRow(
-                activity, dock, compact, if (compact) 88.dp else 106.dp, move, focused,
-                Modifier.align(Alignment.BottomStart).padding(start = margin, end = margin, bottom = 34.dp),
+                activity, dock, compact, lastFocus, move, focused,
+                Modifier.align(Alignment.BottomCenter).padding(start = margin, end = margin, bottom = 34.dp),
                 onApps = {
                     focusOnSwitch = apps.firstOrNull()?.let(::shelfKey) ?: "home/settings"
                     appsOpen = true
@@ -251,8 +255,8 @@ private fun LauncherScreen(activity: MainActivity) {
         OptionsDialog("Launcher settings", activity.homeStatus, buildList {
             add(Setting("tv-settings", "TV settings", run = activity::tvSettings))
             add(Setting("default-home", "Default Home app", run = activity::defaultHomeSettings))
+            if (BuildConfig.DEBUG) add(Setting("home-fallback", "Home button fallback", run = activity::homeButtonSettings))
             add(Setting("credits", "Photo credits") { credits = true })
-            if (BuildConfig.DEBUG) add(Setting("home-button", "Remote Home button", run = activity::homeButtonSettings))
         }) { settings = false }
     }
     if (credits) {
@@ -309,15 +313,17 @@ private fun FavoritesRow(
     activity: MainActivity,
     dock: List<TvApp>,
     compact: Boolean,
-    height: Dp,
+    focusedId: String?,
     move: FocusMove?,
     onFocused: (String) -> Unit,
     modifier: Modifier,
     onApps: () -> Unit,
     onMenu: (TvApp) -> Unit,
 ) {
+    val height = if (compact) 80.dp else 88.dp
+    val iconSize = if (compact) 44.dp else 52.dp
     Row(
-        modifier.widthIn(max = 820.dp).fillMaxWidth(),
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
     ) {
         dock.forEach { app ->
@@ -327,6 +333,8 @@ private fun FavoritesRow(
                     onClick = { activity.open(app) },
                     onLong = { onMenu(app) },
                     modifier = Modifier.weight(1f),
+                    iconSize = iconSize,
+                    muted = focusedId != dockKey(app),
                 )
             }
         }
@@ -336,8 +344,8 @@ private fun FavoritesRow(
             glassShape = glassTile,
         ) {
             TileCaption("All apps") {
-                Box(Modifier.size(if (compact) 38.dp else 46.dp), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.home_apps), null, Modifier.size(if (compact) 30.dp else 35.dp))
+                Box(Modifier.size(iconSize), contentAlignment = Alignment.Center) {
+                    Image(painterResource(R.drawable.home_apps), null, Modifier.size(if (compact) 32.dp else 38.dp))
                 }
             }
         }
@@ -358,7 +366,7 @@ private fun HomeAction(
         glassShape = tileShape,
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Image(painterResource(icon), label, Modifier.size(24.dp))
+            Image(painterResource(icon), label, Modifier.size(24.dp), colorFilter = mutedIcon)
         }
     }
 }
@@ -396,6 +404,8 @@ private fun AppTile(
     onLong: () -> Unit,
     modifier: Modifier = Modifier,
     flat: Boolean = false,
+    iconSize: Dp = if (height < 90.dp) 38.dp else 46.dp,
+    muted: Boolean = false,
 ) {
     val icon by produceState<Bitmap?>(null, app.component) { value = activity.iconFor(app) }
     val bitmap = icon
@@ -406,12 +416,16 @@ private fun AppTile(
         fill = if (flat) Color(0xFF2B2B2B) else null,
     ) {
         TileCaption(app.label) {
-            if (bitmap != null) {
-                val size = Modifier.size(if (height < 90.dp) 38.dp else 46.dp)
-                Image(bitmap.asImageBitmap(), null, size.clip(RoundedCornerShape(9.dp)))
+            val painter = if (bitmap != null) {
+                remember(bitmap) { BitmapPainter(bitmap.asImageBitmap()) }
             } else {
-                Image(painterResource(R.drawable.banana_icon), null, Modifier.size(38.dp))
+                painterResource(R.drawable.banana_icon)
             }
+            Image(
+                painter, null, Modifier.size(iconSize).clip(RoundedCornerShape(9.dp)),
+                alpha = if (muted) .78f else 1f,
+                colorFilter = if (muted) mutedIcon else null,
+            )
         }
     }
 }
@@ -419,12 +433,12 @@ private fun AppTile(
 @Composable
 private fun TileCaption(label: String, icon: @Composable () -> Unit) {
     Column(
-        Modifier.fillMaxSize().padding(6.dp),
+        Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
     ) {
         icon()
-        Text(label, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, fontSize = 14.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -501,11 +515,7 @@ private fun FocusSurface(
                 BorderStroke(if (glassShape != null) 1.5.dp else 2.dp, Color.White), shape = shape,
             ),
         ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = when {
-            contentShowsFocus -> 1f
-            glassShape != null -> 1.045f
-            else -> 1.025f
-        }),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = if (transparentFocus) 1f else 1.025f),
     ) { content() }
 }
 

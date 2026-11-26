@@ -78,12 +78,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -130,6 +133,7 @@ internal fun EpisodeHero(
     open: (UpcomingEpisode) -> Unit,
     options: (UpcomingEpisode) -> Unit,
     showOptionsHint: Boolean,
+    modifier: Modifier,
 ) {
     val row = rememberLazyListState()
     LaunchedEffect(move) {
@@ -137,7 +141,7 @@ internal fun EpisodeHero(
         if (index >= 0 && row.layoutInfo.visibleItemsInfo.none { it.index == index }) row.scrollToItem(index)
     }
     Column(
-        Modifier.widthIn(max = 696.dp).fillMaxWidth(),
+        modifier.widthIn(max = 696.dp).fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(selected.title.name, fontSize = 23.sp, fontWeight = FontWeight.SemiBold,
@@ -149,7 +153,15 @@ internal fun EpisodeHero(
                 "Resume ${clockTime(it.timeMs / 1000)}",
             ).joinToString(" · ")
         } ?: selected.episode.label()
-        Text(if (showOptionsHint) "$caption · Hold OK for options" else caption, color = foreground, fontSize = 14.sp)
+        Text(
+            buildAnnotatedString {
+                append(caption)
+                if (showOptionsHint) withStyle(SpanStyle(color = secondary, fontSize = 10.sp)) {
+                    append("  ·  Hold OK for options")
+                }
+            },
+            color = foreground, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
         LazyRow(
             state = row, modifier = Modifier.fillMaxWidth().padding(top = 4.dp).focusGroup(),
             contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
@@ -1039,21 +1051,12 @@ internal fun MediaTitleScreen(
                     .size(142.dp, 213.dp).clip(mediaShape), 480,
             )
         }
-        FocusSurface(
-            "title/play", actionFocus, { focusedAction = it },
-            {
-                if (!media.configured || (!media.connected && !title.freeStream && !title.freeDownload)) onConnect()
-                else scope.launch { startPlayback() }
-            },
-            Modifier.align(Alignment.Center).size(76.dp).semantics { contentDescription = "Play" },
-            enabled = !busy, glassShape = CircleShape,
+        MediaIconButton(
+            "Play", R.drawable.media_play, "title/play", actionFocus, { focusedAction = it },
+            enabled = !busy, modifier = Modifier.align(Alignment.Center).size(64.dp),
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Box(Modifier.size(57.dp).border(2.dp, foreground, CircleShape), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.media_play), null, Modifier.size(38.dp),
-                        colorFilter = ColorFilter.tint(Color(0xFFFA605B)))
-                }
-            }
+            if (!media.configured || (!media.connected && !title.freeStream && !title.freeDownload)) onConnect()
+            else scope.launch { startPlayback() }
         }
         Column(
             Modifier.align(Alignment.CenterEnd).padding(end = margin)

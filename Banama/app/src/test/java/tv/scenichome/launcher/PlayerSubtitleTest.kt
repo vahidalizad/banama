@@ -1,9 +1,20 @@
 package tv.scenichome.launcher
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class PlayerSubtitleTest {
+    @Test
+    fun omitsPlaceholderCaptionsWhileKeepingNamedAndLanguageTaggedTracks() {
+        assertNull(subtitleDisplayName(null, null))
+        assertNull(subtitleDisplayName("und", "Subtitle 1"))
+        assertNull(subtitleDisplayName("1", null))
+        assertEquals("Persian CC", subtitleDisplayName("und", "Persian CC"))
+        assertNotNull(subtitleDisplayName("fa", "Subtitle 1"))
+    }
+
     @Test
     fun languagePreferenceMatchesBothEnglishAndPersianAcrossSources() {
         assertEquals("en", subtitlePreferenceKey("eng", "Track 1"))

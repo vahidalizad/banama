@@ -48,6 +48,7 @@ Each name maps to `/action/{name}` under the API base. A dash means an empty for
 | `advanced_search_parameters` | — | Available filter values. Use server-provided values for genre, quality, and other enumerations. |
 | `advanced_search` | `parameters` as JSON in a single form field, `orderby`, `order`, `page` | `result.posts`, `page`, `pages`, and `total`. SDK defaults are `relevant`, `DESC`, and page 1. The Hybrid form can override the sort. |
 | `archive` | `slugs` as an array, `streamonly`, `page`, `orderby`, `order` | Genre and category browse results. The SDK uses `qs.stringify`, so the array keys serialize as `slugs[0]`, `slugs[1]`, and so on, URL-encoded in the request. |
+| `user` | — | The profile uses `result.user_name`, `result.user_type`, and `result.user_expire.days`. The TV web client displays `golden` as Gold. |
 | `single` | `post_id` | `result` contains title metadata, `options`, subtitles, and related details. `options.is_series` drives series UI. |
 | `user_mylist` | — | Membership for `watchlist`, `favorite`, `notify`, and `downloadlist`. TV checks `result.watchlist.post` for membership by title ID. |
 | `user_list` | `action=list`, `group=watchlist`, `page=1`, `orderby=add_list`, `order=DESC` | `result.posts` and pagination. Hybrid uses these fields for its library tab. |
@@ -72,11 +73,13 @@ Read `options.free_stream` and `options.free_download` from title details when c
 
 On the TCL, the native API returned 720p and 1080p download releases for both seasons of *The Gentlemen* (`630434`). The sampled HLS master also topped out at 1080p. The website trace used a separate v1 download API at `interface.30nama.com`. That route returned HTML in the native client probe without a website session, so Scenic Home continues to use the verified Android TV API. Two UHD Matroska releases from the TV API returned `206 Partial Content` at byte 0 and at a 1 MiB offset.
 
-### 4K-first playback
+### Playback quality
 
-1. Try the highest-bitrate compatible 4K HLS track first. If a seekable 4K download is unavailable, start the highest compatible streaming resolution automatically. A cropped 4K file can be 3840 pixels wide with fewer than 2160 active lines.
-2. For an entitled 4K download, select an actual file using resolution and media information. Probe the fresh HTTPS URL with a small ranged `GET` such as `Range: bytes=0-65535`. Check for `206 Partial Content` and a matching `Content-Range`. A `200` on that GET means the server ignored the range, so close the probe promptly. Check a nonzero offset and seek behavior before relying on the URL for progressive playback.
-3. Rank seekable 4K releases by the total bytes reported in `Content-Range`, largest first. List the result as **4K Download** alongside supported stream qualities. Media3 buffers as it plays and seeks with byte ranges. Keep the playback position and pause state when switching sources. Chapter times are specific to the streaming file.
+1. Group compatible HLS renditions and entitled direct releases by descending resolution. Within each resolution, sort reported file sizes from largest to smallest, followed by options with unknown size. Show the codec and bitrate for HLS and the release's encoder and container when the download metadata provides them. Cropped 4K video can be 3840 pixels wide with fewer than 2160 active lines.
+2. Remember a selected 4K, 1080p, 720p, or 480p tier. Prefer HLS when both source types offer the same tier. If the saved tier is missing, try the highest available tier below it, then the closest higher tier. The initial preference is 4K.
+3. Probe a direct file's HTTPS URL with ranged `GET` requests at byte zero and a nonzero offset. Require `206 Partial Content` and a matching `Content-Range`, then check that Media3 can seek the item. Keep the playback position and pause state when switching sources. Chapter times are specific to the streaming file.
+
+On the API 36 ARM64 Google TV emulator, the 65.76 GB CiNEPHiLES MKV for *Spider-Man: Brand New Day* (post 666683) contains Dolby Vision `dvhe.07.06`. Android left the original video track unselected. Its HEVC decoder then failed on the base layer with Media3 error 4003. The bundled FFmpeg 9.1 decoder played the base layer at 3840 × 2160. Switching back to the 480p HLS rendition used Android’s H.264 decoder at 852 × 356.
 
 References for the player and HTTP checks. [Media3 HLS](https://developer.android.com/media/media3/exoplayer/hls) · [Media3 progressive media](https://developer.android.com/media/media3/exoplayer/progressive) · [Media3 track selection](https://developer.android.com/media/media3/exoplayer/track-selection) · [HTTP range requests](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests)
 

@@ -27,6 +27,10 @@ class MainActivity : ComponentActivity() {
         get() = prefs.getString("subtitle_preference", null)
         set(value) { prefs.edit().putString("subtitle_preference", value).apply() }
 
+    internal var preferredResolution: Int
+        get() = prefs.getInt("preferred_resolution", 2160)
+        set(value) { prefs.edit().putInt("preferred_resolution", value).apply() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { BanamaHome(this) }

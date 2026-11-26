@@ -1,31 +1,42 @@
 package tv.scenichome.launcher
 
+import android.graphics.Bitmap
 import android.view.KeyEvent
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -34,14 +45,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,8 +81,17 @@ internal val foreground = Color(0xFFF5F5F5)
 internal val secondary = Color(0xFFCBCBCB)
 internal val edge = Color(0xFF585858)
 internal val tileShape = RoundedCornerShape(12.dp)
+private val headerGlass = Color(0x4814101B)
 internal data class FocusMove(val id: String, val revision: Int)
 internal fun heroKey(id: Int) = "home/hero/$id"
+
+internal fun initialHomeFocus(resumeId: Int?, suggestedId: Int?, waitingForResume: Boolean, waitingForSuggestions: Boolean): String? =
+    when {
+        resumeId != null -> heroKey(resumeId)
+        waitingForResume || waitingForSuggestions -> null
+        suggestedId != null -> "home/suggested/$suggestedId"
+        else -> "home/search"
+    }
 
 @Composable
 internal fun BanamaHome(activity: MainActivity) {
@@ -145,6 +172,7 @@ internal fun BanamaHome(activity: MainActivity) {
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun HomeScreen(
     activity: MainActivity,
     onSearch: (MediaLibrary?) -> Unit,
@@ -156,96 +184,211 @@ private fun HomeScreen(
     val accountRevision = media.accountRevision
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    var settings by remember { mutableStateOf(false) }
+    var profileOpen by remember { mutableStateOf(false) }
     var heroMenu by remember(accountRevision) { mutableStateOf<UpcomingEpisode?>(null) }
-    var lastFocus by rememberSaveable { mutableStateOf("home/search") }
+    var lastFocus by rememberSaveable { mutableStateOf("") }
+    var currentFocus by remember { mutableStateOf("home/search") }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
+    var revealTarget by remember { mutableStateOf<String?>(null) }
+    var previewAbove by rememberSaveable { mutableStateOf(false) }
+    val rowScroll = LocalBringIntoViewSpec.current
+    val headerInset = with(LocalDensity.current) { 78.dp.toPx() }
+    val shelfPreview = with(LocalDensity.current) { 132.dp.toPx() }
+    val homeScroll = remember(headerInset, shelfPreview) {
+        object : BringIntoViewSpec {
+            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+                val room = containerSize - headerInset - size
+                if (room < 0f) return super.calculateScrollDistance(offset, size, containerSize)
+                // The hero keeps its full height when the episode row has focus.
+                val first = list.layoutInfo.visibleItemsInfo.firstOrNull()
+                val inHero = first != null && first.index == 0 && offset + size / 2 < first.offset + first.size
+                val preview = if (inHero) 0f else minOf(shelfPreview, room)
+                val top = headerInset + if (previewAbove) preview else 0f
+                if (offset < top) return offset - top
+                val bottomInset = if (previewAbove) 0f else preview
+                return (offset + size + bottomInset - containerSize).coerceAtLeast(0f)
+            }
+        }
+    }
 
     val upcoming = media.heroEpisodes
     val latest = upcoming.firstOrNull()
     var heroTitleId by remember(latest?.title?.id, accountRevision) { mutableIntStateOf(0) }
     val hero = upcoming.firstOrNull { it.title.id == heroTitleId } ?: latest
+    val watchedSeries = hero?.title?.takeIf { media.connected && it.series }
+        ?: upcoming.firstOrNull { media.connected && it.title.series }?.title
     val shelves = buildList {
         MediaLibrary.entries.filter { it == MediaLibrary.WATCHLIST || media.connected }.forEach { library ->
             add(Triple(library.key, library.label, media.shelves[library]?.titles.orEmpty().take(8)))
         }
         if (media.suggestions.isNotEmpty()) add(Triple("suggested", "Suggested", media.suggestions))
     }
-    val targets = listOf("home/search", "home/account") + upcoming.map { heroKey(it.title.id) } +
+    val headerTargets = listOf("home/search", "home/account")
+    val focusRows = (listOf(headerTargets, upcoming.map { heroKey(it.title.id) }) +
         shelves.flatMap { (key, _, titles) ->
             val library = MediaLibrary.entries.firstOrNull { it.key == key }
-            titles.map { "home/$key/${it.id}" } + listOfNotNull(
-                "home/$key/all".takeIf { library != null && library in media.shelves },
-                "home/$key/status".takeIf { library != null && (!media.connected || media.libraryRetry(library)) },
+            listOf(
+                listOfNotNull("home/$key/status".takeIf {
+                    library == MediaLibrary.WATCHLIST && !media.connected ||
+                        library != null && media.libraryRetry(library)
+                }),
+                titles.map { "home/$key/${it.id}" } +
+                    listOfNotNull("home/$key/all".takeIf { library != null && library in media.shelves }),
             )
-        }
-    val dialogOpen = settings || heroMenu != null
+        }).filter { it.isNotEmpty() }
+    val targets = focusRows.flatten()
+    val dialogOpen = profileOpen || heroMenu != null
     val focusLost = lastFocus !in targets
-    LaunchedEffect(activity.foreground, dialogOpen, focusLost) {
+    val focusAtTop = lastFocus in headerTargets || lastFocus.startsWith("home/hero/")
+    val initialTarget = initialHomeFocus(latest?.title?.id, media.suggestions.firstOrNull()?.id,
+        media.configured && media.connected && !media.historyLoaded, media.configured && !media.homeLoaded)
+    LaunchedEffect(revealTarget, focusAtTop) {
+        val target = revealTarget?.let { if (it in targets) it else "home/search" }
+        val index = shelves.indexOfFirst { (key, _, _) -> target?.startsWith("home/$key/") == true } + 1
+        if (index > 0) {
+            if (list.layoutInfo.visibleItemsInfo.none { it.index == index }) {
+                val inset = minOf((headerInset + shelfPreview).toInt(), list.layoutInfo.viewportSize.height / 2)
+                list.animateScrollToItem(index, -inset)
+            }
+        } else if ((target != null || focusAtTop) && list.canScrollBackward) {
+            list.animateScrollToItem(0)
+        }
+        if (target != null) {
+            move = FocusMove(target, ++sequence)
+            revealTarget = null
+        }
+    }
+    val recoveryTarget = initialTarget.takeIf { focusLost }
+    LaunchedEffect(activity.foreground, dialogOpen, focusLost, recoveryTarget) {
         if (!activity.foreground || dialogOpen) return@LaunchedEffect
-        val target = lastFocus.takeIf { !focusLost } ?: "home/search"
+        val target = lastFocus.takeIf { !focusLost } ?: recoveryTarget ?: return@LaunchedEffect
         val group = target.split('/')[1]
-        val item = shelves.indexOfFirst { it.first == group }
-        if (item >= 0) {
-            val index = item + if (hero == null) 0 else 1
+        val index = shelves.indexOfFirst { it.first == group } + 1
+        if (index > 0) {
             if (list.layoutInfo.visibleItemsInfo.none { it.index == index }) list.scrollToItem(index)
-        } else if (group == "hero" && hero != null) {
-            list.scrollToItem(0)
         }
         move = FocusMove(target, ++sequence)
     }
-    val focused: (String) -> Unit = { if (!dialogOpen) lastFocus = it }
+    val focused: (String) -> Unit = { id ->
+        if (!dialogOpen) {
+            currentFocus = id
+            if (move != null || lastFocus.isNotEmpty()) lastFocus = id
+        }
+    }
 
-    Column(Modifier.fillMaxSize().padding(top = 24.dp)) {
+    BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent {
+        val key = it.nativeKeyEvent
+        if (dialogOpen) return@onPreviewKeyEvent false
+        if (revealTarget != null && key.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_CENTER) {
+            return@onPreviewKeyEvent true
+        }
+        val firstPress = key.action == KeyEvent.ACTION_DOWN
+        if (firstPress && lastFocus.isEmpty() && key.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_CENTER) {
+            lastFocus = currentFocus
+        }
+        if (key.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && firstPress) previewAbove = false
+        val target = when {
+            key.keyCode == KeyEvent.KEYCODE_DPAD_UP -> {
+                val index = focusRows.indexOfFirst { lastFocus in it }
+                val previous = focusRows.getOrNull(index - 1)
+                when {
+                    previous == null -> null
+                    previous == headerTargets -> "home/search"
+                    hero != null && heroKey(hero.title.id) in previous -> heroKey(hero.title.id)
+                    else -> previous[focusRows[index].indexOf(lastFocus).coerceAtMost(previous.lastIndex)]
+                }
+            }
+            key.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && lastFocus in headerTargets ->
+                hero?.let { episode -> heroKey(episode.title.id) }
+            else -> null
+        }
+        if (target != null && firstPress) {
+            previewAbove = key.keyCode == KeyEvent.KEYCODE_DPAD_UP
+            revealTarget = target
+        }
+        target != null
+    }) {
+        val stageHeight = if (hero == null && media.suggestions.isEmpty()) 90.dp
+            else (maxHeight * .72f).coerceIn(254.dp, 510.dp)
+        CompositionLocalProvider(LocalBringIntoViewSpec provides homeScroll) {
+            LazyColumn(
+                state = list,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(22.dp),
+            ) {
+                item(key = "hero") {
+                    Box(Modifier.fillMaxWidth().height(stageHeight).clipToBounds()) {
+                        key(accountRevision) {
+                            HomeArtwork(media, watchedSeries, showSuggestedTitle = hero == null)
+                        }
+                        if (hero != null) {
+                            CompositionLocalProvider(LocalBringIntoViewSpec provides rowScroll) {
+                                EpisodeHero(
+                                    media, upcoming, hero, move,
+                                    focused = { episode ->
+                                        heroTitleId = episode.title.id
+                                        focused(heroKey(heroTitleId))
+                                    },
+                                    open = onHero, options = { heroMenu = it },
+                                    showOptionsHint = lastFocus == heroKey(hero.title.id),
+                                    modifier = Modifier.align(Alignment.BottomStart)
+                                        .padding(start = 40.dp, end = 40.dp, bottom = 12.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+                items(shelves.size, key = { shelves[it].first }) { index ->
+                    val (key, label, titles) = shelves[index]
+                    val library = MediaLibrary.entries.firstOrNull { it.key == key }
+                    Box(Modifier.padding(horizontal = 40.dp)) {
+                        CompositionLocalProvider(LocalBringIntoViewSpec provides rowScroll) {
+                            MediaShelf(
+                                media, key, label, titles, move, focused, onTitle, onConnect,
+                                onRetry = { scope.launch { media.refresh(home = false, library = library, force = true) } },
+                                library = library, onSeeAll = { onSearch(library) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(102.dp).background(Brush.verticalGradient(
+            listOf(Color(0xCB101010), Color(0x53101010), Color.Transparent),
+        )))
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 40.dp),
+            Modifier.fillMaxWidth().padding(start = 40.dp, end = 40.dp, top = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Banama", Modifier.weight(1f), fontSize = 32.sp, fontWeight = FontWeight.SemiBold)
-            Action("Search", { onSearch(null) }, "home/search", move, focused, icon = R.drawable.media_search)
-            Action("30nama", {
-                if (media.connected) settings = true else onConnect()
-            }, "home/account", move, focused)
-        }
-        LazyColumn(
-            state = list,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 40.dp, vertical = 22.dp),
-            verticalArrangement = Arrangement.spacedBy(22.dp),
-        ) {
-            if (hero != null) item(key = "hero") {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Continue Watching", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-                    EpisodeHero(
-                        media, upcoming, hero, move,
-                        focused = { episode ->
-                            heroTitleId = episode.title.id
-                            focused(heroKey(heroTitleId))
-                        },
-                        open = onHero, options = { heroMenu = it },
-                        showOptionsHint = lastFocus == heroKey(hero.title.id),
-                    )
-                }
-            }
-            items(shelves.size, key = { shelves[it].first }) { index ->
-                val (key, label, titles) = shelves[index]
-                val library = MediaLibrary.entries.firstOrNull { it.key == key }
-                MediaShelf(
-                    media, key, label, titles, move, focused, onTitle, onConnect,
-                    onRetry = { scope.launch { media.refresh(home = false, library = library, force = true) } },
-                    library = library, onSeeAll = { onSearch(library) },
-                )
-            }
+            Action(
+                "Search", { onSearch(null) }, "home/search", move, focused, Modifier.width(136.dp),
+                icon = R.drawable.media_search, glassTint = headerGlass,
+            )
+            FocusSurface(
+                "home/account", move, focused, { profileOpen = true },
+                Modifier.size(48.dp).semantics { contentDescription = "Profile" },
+                glassShape = CircleShape, glassTint = headerGlass,
+            ) { ProfileBadge(media.account, Modifier.fillMaxSize()) }
         }
     }
 
-    if (settings) {
-        MediaDialog("30nama", null, listOf("Pair again", "Disconnect 30nama"), close = { settings = false }) {
-            settings = false
-            if (it == 0) onConnect() else scope.launch { media.disconnect() }
-        }
+    if (profileOpen) {
+        ProfileDialog(
+            media.account, media.connected,
+            close = { profileOpen = false },
+            connect = {
+                profileOpen = false
+                onConnect()
+            },
+            disconnect = {
+                profileOpen = false
+                scope.launch { media.disconnect() }
+            },
+        )
     }
     heroMenu?.let { episode ->
         MediaDialog(
@@ -262,6 +405,43 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun HomeArtwork(media: MediaStore, watched: MediaTitle?, showSuggestedTitle: Boolean) {
+    val suggestions = media.suggestions.take(4)
+    val artwork by produceState<Pair<MediaTitle, Bitmap>?>(null, watched, suggestions) {
+        value = (listOfNotNull(watched) + suggestions).firstNotNullOfOrNull { title ->
+            listOfNotNull(title.cover, title.poster).distinct().firstNotNullOfOrNull { url ->
+                media.artwork.image(url, 1920)?.let { title to it }
+            }
+        }
+    }
+    val (title, bitmap) = artwork ?: return
+    val portrait = bitmap.height > bitmap.width
+    Box(Modifier.fillMaxSize()) {
+        val bounds = if (portrait) {
+            Modifier.align(Alignment.CenterEnd).padding(top = 68.dp, bottom = 16.dp, end = 54.dp)
+                .fillMaxHeight().aspectRatio(bitmap.width.toFloat() / bitmap.height)
+        } else Modifier.fillMaxSize()
+        Image(remember(bitmap) { bitmap.asImageBitmap() }, null, bounds, contentScale = ContentScale.Crop)
+        if (!portrait) {
+            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(
+                0f to Color(0xA7101010), .44f to Color(0x43101010), 1f to Color.Transparent,
+            )))
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+                .53f to Color.Transparent, 1f to ink,
+            )))
+        }
+        if (showSuggestedTitle) {
+            Text(
+                title.name,
+                Modifier.align(Alignment.BottomStart).padding(start = 40.dp, bottom = 20.dp).widthIn(max = 460.dp),
+                fontSize = 32.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
 internal fun Action(
     title: String,
     onClick: () -> Unit,
@@ -271,12 +451,18 @@ internal fun Action(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     @DrawableRes icon: Int? = null,
+    glassTint: Color? = null,
 ) {
-    FocusSurface(id, move, onFocused, onClick, modifier.height(48.dp), enabled = enabled) {
+    FocusSurface(id, move, onFocused, onClick, modifier.height(48.dp), enabled = enabled,
+        glassShape = tileShape.takeIf { glassTint != null }, glassTint = glassTint) {
         Row(
-            Modifier.fillMaxHeight().padding(horizontal = 15.dp),
+            Modifier.fillMaxHeight()
+                .then(if (glassTint == null) Modifier else Modifier.fillMaxWidth())
+                .padding(horizontal = 15.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(
+                8.dp, if (glassTint == null) Alignment.Start else Alignment.CenterHorizontally,
+            ),
         ) {
             icon?.let {
                 Image(painterResource(it), null, Modifier.size(20.dp),
@@ -298,10 +484,12 @@ internal fun FocusSurface(
     onLongClick: (() -> Unit)? = null,
     glassShape: Shape? = null,
     fill: Color? = null,
+    glassTint: Color? = null,
     content: @Composable () -> Unit,
 ) {
     val requester = remember { FocusRequester() }
     val shape = glassShape ?: tileShape
+    val glassColor = glassTint ?: Color(0xAB161616)
     val contentShowsFocus = fill == Color.Transparent
     val transparentFocus = glassShape != null || contentShowsFocus
     LaunchedEffect(move, enabled) {
@@ -319,13 +507,13 @@ internal fun FocusSurface(
         },
         shape = ClickableSurfaceDefaults.shape(shape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (glassShape != null) Color(0xAB161616) else fill ?: Color(0xFF303030),
+            containerColor = if (glassShape != null) glassColor else fill ?: Color(0xFF303030),
             contentColor = foreground,
-            focusedContainerColor = if (glassShape != null) Color(0xAB161616) else if (contentShowsFocus) Color.Transparent else focusColor,
+            focusedContainerColor = if (glassShape != null) glassColor else if (contentShowsFocus) Color.Transparent else focusColor,
             focusedContentColor = if (transparentFocus) foreground else ink,
             pressedContainerColor = when {
                 contentShowsFocus -> Color.Transparent
-                glassShape != null -> Color(0xC93A3A3A)
+                glassShape != null -> glassTint?.copy(alpha = .43f) ?: Color(0xC93A3A3A)
                 else -> focusColor
             },
             pressedContentColor = if (transparentFocus) foreground else ink,

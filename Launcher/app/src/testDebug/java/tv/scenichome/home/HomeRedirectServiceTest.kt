@@ -6,13 +6,14 @@ import org.junit.Test
 
 class HomeRedirectServiceTest {
     @Test
-    fun redirectOnlyTheGoogleTvHomeActivity() {
-        val stock = "com.google.android.apps.tv.launcherx"
-        val home = "$stock.home.HomeActivity"
-        assertTrue(isGoogleTvHome(stock, StringBuilder(home)))
-        assertFalse(isGoogleTvHome(stock, "$stock.settings.SettingsActivity"))
-        assertFalse(isGoogleTvHome("com.android.tv.settings", home))
-        assertFalse(isGoogleTvHome(stock, null))
-        assertFalse(isGoogleTvHome(null, home))
+    fun redirectsOnlyDeclaredHomeWindowsAndIgnoresDuplicateEvents() {
+        val watch = HomeRedirectWatch("tv.stock", setOf("tv.stock.HomeAlias", "tv.stock.Home"))
+
+        assertFalse(watch.shouldRedirect("tv.other", "tv.stock.Home", 0))
+        assertFalse(watch.shouldRedirect("tv.stock", "tv.stock.Settings", 0))
+        assertFalse(watch.shouldRedirect("tv.stock", null, 0))
+        assertTrue(watch.shouldRedirect("tv.stock", StringBuilder("tv.stock.Home"), 0))
+        assertFalse(watch.shouldRedirect("tv.stock", "tv.stock.HomeAlias", 599))
+        assertTrue(watch.shouldRedirect("tv.stock", "tv.stock.HomeAlias", 600))
     }
 }

@@ -73,7 +73,40 @@ internal enum class SearchOrder(val label: String, val parameter: String) {
         }
     }
 }
-internal data class MediaAccount(val days: Int?, val stream: Boolean, val download: Boolean, val userId: Int)
+internal data class MediaAccount(
+    val days: Int?,
+    val stream: Boolean,
+    val download: Boolean,
+    val userId: Int,
+    val username: String,
+    val type: String,
+) {
+    val tier: String
+        get() = when (type) {
+            "golden" -> "Gold"
+            "blue" -> "Blue"
+            "red" -> "Red"
+            "free" -> "Free"
+            "staff" -> "Staff"
+            "admin" -> "Admin"
+            "robot" -> "Robot"
+            else -> "30nama membership"
+        }
+
+    val initials: String
+        get() = username.split(' ', '.', '_', '-').asSequence()
+            .mapNotNull { part -> part.firstOrNull(Char::isLetterOrDigit) }
+            .take(2).joinToString("") { it.uppercaseChar().toString() }
+}
+
+internal fun JSONObject.readAccount() = MediaAccount(
+    days = optJSONObject("user_expire")?.text("days")?.toIntOrNull()?.coerceAtLeast(0),
+    stream = optBoolean("user_allowed_to_stream"),
+    download = optBoolean("user_allowed_to_download"),
+    userId = optInt("user_id"),
+    username = text("user_name").trim(),
+    type = text("user_type").trim().lowercase(Locale.ROOT),
+)
 internal data class Caption(val language: String, val url: String)
 internal data class EpisodeNumber(val season: Int, val episode: Int) : Comparable<EpisodeNumber> {
     override fun compareTo(other: EpisodeNumber) = compareValuesBy(this, other, EpisodeNumber::season, EpisodeNumber::episode)
@@ -98,7 +131,18 @@ internal data class MediaEpisode(
 
 internal data class PlaybackMarkers(val intro: LongRange?, val creditsMs: Long?)
 
-internal data class DownloadVideo(val season: Int, val episode: Int, val url: String, val captions: List<Caption>)
+internal data class DownloadVideo(
+    val season: Int,
+    val episode: Int,
+    val url: String,
+    val captions: List<Caption>,
+    val resolution: Int? = null,
+    val encoder: String = "",
+    val container: String = "",
+    val edition: String = "",
+    val id: Int = 0,
+    val size: String = "",
+)
 internal data class PlaybackCatalog(
     val episodes: List<MediaEpisode>,
     val resumeFile: Int,
@@ -361,7 +405,6 @@ internal fun JSONObject.playbackCatalog(): PlaybackCatalog {
 
 private val seasonPattern = Regex("""(?i)(?:s(?:eason)?\s*)?(\d+)""")
 private val episodePattern = Regex("""(?i)(?:^|\W|\d)(?:episode\s*|e)(\d+)\b""")
-private val uhdPattern = Regex("""(?i)\b(?:2160p?|4\s*k|uhd)\b|\b(?:3840|4096)\s*[x×]\s*\d+""")
 
 private fun String.seasonIndex(): Int? = seasonPattern.matchEntire(trim())?.groupValues?.get(1)?.toIntOrNull()
 
@@ -369,8 +412,17 @@ private fun JSONObject.episodeIndex(): Int? = sequenceOf(text("episode_number"),
     .mapNotNull { it.trim().toIntOrNull() ?: episodePattern.find(it)?.groupValues?.get(1)?.toIntOrNull() }
     .firstOrNull()
 
-private fun JSONObject.isUhdDownload() =
-    uhdPattern.containsMatchIn("${text("resolution")} ${text("quality")} ${text("tags")}")
+private val dimensionsPattern = Regex("""(?i)\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b""")
+private val progressivePattern = Regex("""(?i)(?<!\d)(\d{3,4})p\b""")
+private val uhdPattern = Regex("""(?i)\b(?:4\s*k|uhd)\b""")
+private val videoContainers = setOf("mkv", "mp4", "m4v", "webm", "mov", "avi", "ts", "m2ts", "mpg", "mpeg", "flv", "3gp", "m3u8")
+
+private fun String.releaseResolution(): Int? {
+    if (uhdPattern.containsMatchIn(this)) return 2160
+    progressivePattern.find(this)?.let { return it.groupValues[1].toInt() }
+    dimensionsPattern.find(this)?.let { return videoResolution(it.groupValues[1].toInt(), it.groupValues[2].toInt()) }
+    return trim().toIntOrNull()?.takeIf { it in 144..4320 }
+}
 
 internal fun JSONObject.downloads(): List<DownloadVideo> {
     val bySeason = optJSONObject("download")
@@ -378,15 +430,30 @@ internal fun JSONObject.downloads(): List<DownloadVideo> {
         ?.flatMap { key -> bySeason.optJSONArray(key).objects().map { key.seasonIndex() to it } }
         ?.toList().orEmpty()
     return rows.flatMap { (groupSeason, row) ->
-        val releaseUhd = row.isUhdDownload()
         val season = row.text("season_int").seasonIndex() ?: row.text("season").seasonIndex() ?: groupSeason ?: 0
         val links = row.optJSONArray("link").objects().ifEmpty { listOf(row) }
         links.mapNotNull { link ->
-            if (!releaseUhd && !link.isUhdDownload()) return@mapNotNull null
-            val url = link.text("dl").takeIf { httpsUri(it) != null } ?: return@mapNotNull null
-            val subtitle = link.text("persian_subtitle").ifBlank { row.text("persian_subtitle") }
-            val captions = if (httpsUri(subtitle) != null) listOf(Caption("fa", subtitle)) else emptyList()
-            DownloadVideo(season, link.episodeIndex() ?: row.episodeIndex() ?: 0, url, captions)
+            val url = link.text("dl")
+            val uri = httpsUri(url) ?: return@mapNotNull null
+            fun field(key: String) = link.text(key).trim().ifBlank { row.text(key).trim() }
+            val captions = listOf("fa" to "persian_subtitle", "en" to "english_subtitle").mapNotNull { (lang, key) ->
+                field(key).takeIf { httpsUri(it) != null }?.let { Caption(lang, it) }
+            }
+            val resolution = sequenceOf(link, row).flatMap { release ->
+                sequenceOf("resolution", "quality", "tags").map(release::text)
+            }.plus(uri.path.orEmpty()).firstNotNullOfOrNull(String::releaseResolution)
+            val container = field("container").ifBlank { field("format") }.lowercase(Locale.ROOT)
+                .ifBlank { uri.path.orEmpty().substringAfterLast('.', "").lowercase(Locale.ROOT).takeIf { it in videoContainers }.orEmpty() }
+            val quality = field("quality").takeUnless {
+                progressivePattern.matches(it) || dimensionsPattern.matches(it) || uhdPattern.matches(it) || it.toIntOrNull() != null
+            }.orEmpty()
+            val source = field("source").takeUnless {
+                "://" in it || it.length > 40 || it.substringAfterLast('.', "").lowercase(Locale.ROOT) in videoContainers
+            }.orEmpty()
+            val edition = listOf(quality, source, field("version"))
+                .filter(String::isNotBlank).distinct().joinToString(" · ")
+            DownloadVideo(season, link.episodeIndex() ?: row.episodeIndex() ?: 0, url, captions,
+                resolution, field("encoder"), container, edition, link.optInt("id"), field("size"))
         }
     }.distinctBy { it.url }
 }
@@ -436,19 +503,29 @@ private fun <T> readMedia(address: URI, range: Long? = null, read: (HttpsURLConn
 internal class ExpiredMediaLink : IOException()
 internal fun isExpiredMediaStatus(status: Int) = status == 401 || status == 403 || status == 410
 
-internal suspend fun seekableDownloadSize(address: String): Long? = withContext(Dispatchers.IO) {
-    val uri = httpsUri(address) ?: return@withContext null
-    runCatching {
+internal enum class DownloadRange { SEEKABLE, INVALID, UNREACHABLE }
+
+internal suspend fun downloadRange(address: String): DownloadRange = withContext(Dispatchers.IO) {
+    val uri = httpsUri(address) ?: return@withContext DownloadRange.UNREACHABLE
+    try {
         fun sizeAt(offset: Long): Long? =
             readMedia(uri, offset) { connection ->
-                if (isExpiredMediaStatus(connection.responseCode)) throw ExpiredMediaLink()
-                val total = rangeSize(connection.responseCode, connection.getHeaderField("Content-Range"), offset)
+                val status = connection.responseCode
+                if (isExpiredMediaStatus(status)) throw ExpiredMediaLink()
+                if (status !in 200..299 && status != 416) throw IOException()
+                val total = rangeSize(status, connection.getHeaderField("Content-Range"), offset)
                 total?.takeIf { connection.inputStream.use { it.read() >= 0 && it.read() == -1 } }
             }
-        val first = sizeAt(0) ?: return@runCatching null
-        val seek = sizeAt(1_048_576L) ?: return@runCatching null
-        maxOf(first, seek).takeIf { first == 0L || seek == 0L || first == seek }
-    }.getOrElse { if (it is ExpiredMediaLink) throw it else null }
+        val first = sizeAt(0) ?: return@withContext DownloadRange.INVALID
+        if (first == 1L) return@withContext DownloadRange.INVALID
+        val offset = if (first == 0L) 1_048_576L else minOf(1_048_576L, first - 1)
+        val seek = sizeAt(offset) ?: return@withContext DownloadRange.INVALID
+        if (first == 0L || seek == 0L || first == seek) DownloadRange.SEEKABLE else DownloadRange.INVALID
+    } catch (expired: ExpiredMediaLink) {
+        throw expired
+    } catch (_: IOException) {
+        DownloadRange.UNREACHABLE
+    }
 }
 
 internal class MediaArtwork {
