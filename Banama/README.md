@@ -2,6 +2,8 @@
 
 Open Banama from your TV’s Apps screen. Use **Search** for catalog and saved-list browsing. Open the **Profile** circle to view your 30nama subscription, connect, or sign out. Continue Watching and the movie and series shelves bring you to details and playback.
 
+Starting with 1.1.16, the standard signed build checks GitHub Releases after Home loads. When a newer build is available, select **Update** to the left of **Search**. Banama sends the APK directly to Android’s installer. Follow any installation or “Allow from this source” prompt on the TV. Your sign-in and watch progress stay in place.
+
 During playback, **Up** hides the controls. With the controls hidden, **Down** brings them back without pausing, **Left** and **Right** seek 10 seconds, and **OK** pauses or resumes. If a chapter shortcut has focus, **OK** activates it. For series, use **Episodes** to choose an episode.
 
 For native 30nama access, set `thirtyNama.clientKey` in the ignored `local.properties` next to this wrapper. If 30nama supplies a different endpoint, also set `thirtyNama.api`. Use a client identifier intended for distribution in an APK. The app requests a pairing link and displays a QR code for your phone. [30nama API research](docs/30nama-api.md)

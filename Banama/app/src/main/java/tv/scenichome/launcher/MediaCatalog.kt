@@ -467,7 +467,7 @@ internal fun PlaybackCatalog.includeDownloads(downloads: List<DownloadVideo>): P
     })
 }
 
-private fun java.io.InputStream.readBounded(limit: Int): ByteArray {
+internal fun java.io.InputStream.readBounded(limit: Int): ByteArray {
     val buffer = java.io.ByteArrayOutputStream()
     val block = ByteArray(8192)
     while (true) {

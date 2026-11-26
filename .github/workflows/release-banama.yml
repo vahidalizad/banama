@@ -46,14 +46,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          metadata=Banama/app/build/outputs/apk/release/output-metadata.json
+          code=$(jq -er '.elements[0].versionCode | numbers' "$metadata")
+          version=$(jq -er '.elements[0].versionName | strings' "$metadata")
           tag="banama-$GITHUB_SHA"
           apk=Banama/artifacts/Banama.apk
+          asset="$apk#Banama $version (build $code)"
           if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
             if [[ "$draft" == true ]]; then
-              gh release upload "$tag" "$apk" --clobber
+              gh release upload "$tag" "$asset" --clobber
               gh release edit "$tag" --draft=false
             fi
           else
-            gh release create "$tag" "$apk" --target "$GITHUB_SHA" \
-              --title "Banama (${GITHUB_SHA::7})" --notes "Built from $GITHUB_SHA."
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+              --title "Banama $version (${GITHUB_SHA::7})" --notes "Built from $GITHUB_SHA."
           fi
