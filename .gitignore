@@ -1,7 +1,15 @@
+.DS_Store
+/Emulator/
+.idea/
+*.iml
 .gradle/
 .kotlin/
-**/build/
+build/
 local.properties
 artifacts/
+*.apk
+*.jks
 *.keystore
 *.p12
+adbkey
+adbkey.pub

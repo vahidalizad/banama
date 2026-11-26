@@ -1,104 +1,79 @@
-# BananaLauncher
+# Android TV apps
 
-An Android TV launcher by B4Banana. Open **BananaLauncher** from the TV's **Apps** screen. **All apps** scrolls down to the app grid. Hold **OK** on an app for its options. The gear opens the TV settings panel.
-
-## Install the shared APK
-
-1. Send `artifacts/BananaLauncher.apk` to a TV running Android TV 8.0 or later. Open it with the TV's file manager or transfer app.
-2. If Android asks to **Allow from this source**, allow the app that opened the file. Return to the installer and choose **Install**. Reopen the APK if the installer closed.
-3. Choose **Open**, or select **BananaLauncher** in **Apps**. Hold **OK** on the gear to see where Android routes Home. Choose **Default Home app** to open Android's picker.
-
-On the TCL C89L, Android can select BananaLauncher and still open Google TV when you press **Home**. To set up a remote shortcut, install **Button Mapper** by **flar2** from Google Play and enable its Accessibility service on that TV.
-
-1. In Button Mapper, choose **Add Buttons → Add Buttons** and press **Back** once on the physical remote. If Back only closes the prompt, turn on **Troubleshooting → Use scancodes** and **Alternate button handling**, then register Back again.
-2. Open **Back**, turn on **Customize**, leave **Single tap** on **Default**, and set **Double tap → Applications → BananaLauncher**. Choosing **Home** as the action sends the command back to Google TV.
-3. To configure the house button too, register **Home** under **Add Buttons**, turn on **Customize**, and set **Single tap → Applications → BananaLauncher**.
-4. Open another app and test each shortcut with the physical remote. Both worked from Google Play on the TCL. Launcher settings still shows Android's underlying Home destination. Button Mapper opens BananaLauncher directly. These shortcuts are local to that TV and require Button Mapper's Accessibility service to stay enabled. [Button Mapper's Android TV guide](https://buttonmapper.app/remap-android-tv-remote)
-
-Version 1.1.3 is the first build signed with the distribution key. If a previous debug-signed copy is installed, remove **BananaLauncher** under **Settings → Apps** and open the new APK again. Uninstalling clears local favorites, settings, and the 30nama sign-in. Future releases signed with the same distribution key support **Update** in place.
-
-The release uses Android's Home picker and needs no Accessibility access. Google lists Accessibility as a trigger for the “App blocked to protect your device” warning when sideloading. If the new release still shows this warning, use Google's Play Protect review process. [Google Play Protect developer guidance](https://developers.google.com/android/play-protect/warning-dev-guidance)
-
-## Using the launcher
-
-Press **Down** from favorites to reach Watchlist, Notify, Liked, and Suggested. The hero loads from watch history and shows upcoming Watchlist episodes as they arrive. Suggested artwork fills the hero when no titles are ready. Each saved list ends with **See all**, which opens Search for that list. The Home header opens catalog Search with release-year and genre filters, release-year and IMDb sorting, and YouTube search. Hold **OK** on the gear to manage the 30nama connection. Pair from a phone using the launcher's QR code.
-
-BananaLauncher requests the pairing link directly from 30nama and renders a QR code on the TV. For native access, set `thirtyNama.clientKey` and, if supplied by 30nama, `thirtyNama.api` in the ignored `local.properties` file before building. Use a client identifier intended for distribution in an APK. See [30nama API research](docs/30nama-api.md) for the integration and playback checks.
+[Banama](Banama/) is the 30nama media app. [BananaLauncher](Launcher/) is the TV home screen and app launcher. Each directory is a standalone Android Gradle project.
 
 ## Build and test
 
-From this directory, create the Docker builder and image once.
+Start Docker Desktop. Create the builder and image once from this directory.
 
 ```sh
 docker buildx create --name tv-android --driver docker-container desktop-linux
 docker buildx build --builder tv-android --platform linux/amd64 --load -t tv-android-dev .
 ```
 
-Then build and run the tests.
-
 ```sh
-./dev ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+./dev Banama ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+./dev Launcher ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. The named volume `tv-android-home` holds the Gradle caches, ADB client key, and signing keys.
+`dev` mounts the selected app at `/workspace`. The `tv-android-home` volume holds Gradle caches and the existing debug and distribution keys. Keep a private encrypted backup of its `/home/android/.android/bananalauncher` directory and its debug keystore before deleting the volume.
 
-### Build a release to share
+## Test on the Google TV emulator
 
-```sh
-./dev ./release-apk
-```
-
-This builds the signed release, checks the packaged APK, and writes `artifacts/BananaLauncher.apk`. Increment `versionCode` for each update. Keep a private encrypted backup of the entire `/home/android/.android/bananalauncher` directory, including the password, before removing the Docker volume. Restore that directory when moving release builds to another machine.
-
-The original release key has already been created for this project. For a new distribution with its own signing identity, initialize an empty volume once.
+On Apple silicon, run `./tv-emulator start` in one terminal. From a second terminal in this directory, wait for the Google TV home screen, then install both builds. The `adb` command uses a disposable Docker container and the emulator’s own key under `Emulator/state`.
 
 ```sh
-./dev sh -eu -c '
-umask 077
-mkdir -p "$HOME/.android"
-mkdir "$HOME/.android/bananalauncher"
-cd "$HOME/.android/bananalauncher"
-openssl rand -hex 32 > password
-keytool -genkeypair -storetype PKCS12 -keystore release.p12 -storepass:file password \
-  -alias bananalauncher -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=BananaLauncher"
-'
+./tv-emulator adb wait-for-device
+./tv-emulator adb install -r Banama/app/build/outputs/apk/debug/app-debug.apk
+./tv-emulator adb install -r Launcher/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Install a development build with ADB
-
-With the TV awake, open **Developer options → Wireless debugging**. Pair once using the port in **Pair device with pairing code**. Enter the code at the terminal prompt.
+Use the keyboard arrows, Enter, and Back in the emulator window, or send key events such as `./tv-emulator adb shell input keyevent KEYCODE_DPAD_DOWN`. On a fresh emulator, these commands open each app directly while Google TV is still on its setup screen.
 
 ```sh
-./dev adb pair 192.168.1.112:PAIRING_PORT
+./tv-emulator adb shell am start -n tv.scenichome.home/.MainActivity
+./tv-emulator adb shell am start -n tv.scenichome.launcher/.MainActivity
 ```
 
-Use the address on the **main** Wireless debugging screen for the install. Run connect, install, and disconnect in the same container session.
+Save checks of the physical Home button, TCL firmware, and hardware playback for the real TV.
+
+### Recreate the emulator folder
+
+The setup uses the native ARM64 Android Emulator and the Google TV API 36 image. To rebuild it from an empty `Emulator` directory, download the Temurin 17 macOS ARM64 archive and Google’s macOS ARM64 command-line tools. Extract the JDK to `Emulator/jdk` so `Contents/Home` is inside it. Extract the Android tools to `Emulator/sdk/cmdline-tools/latest` so `bin/sdkmanager` is inside it. [Temurin 17 macOS ARM64 archive](https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.18%2B8/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.18_8.tar.gz) · [Android command-line tools](https://dl.google.com/android/repository/commandlinetools-mac_arm64-16111833_latest.zip)
 
 ```sh
-./dev sh
-TV=192.168.1.112:CONNECT_PORT
-adb connect "$TV"
-adb devices -l
-adb -s "$TV" install -r app/build/outputs/apk/debug/app-debug.apk
-adb disconnect "$TV"
-exit
+emulator_root="$PWD/Emulator"
+mkdir -p "$emulator_root/state/avd" "$emulator_root/tmp"
+export JAVA_HOME="$emulator_root/jdk/Contents/Home"
+export ANDROID_HOME="$emulator_root/sdk" ANDROID_SDK_ROOT="$emulator_root/sdk"
+export ANDROID_USER_HOME="$emulator_root/state" ANDROID_EMULATOR_HOME="$emulator_root/state"
+export ANDROID_AVD_HOME="$emulator_root/state/avd" TMPDIR="$emulator_root/tmp"
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+  emulator platform-tools 'system-images;android-36;google-tv;arm64-v8a'
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+  create avd -n Google_TV_API_36 -k 'system-images;android-36;google-tv;arm64-v8a' -d tv_1080p
 ```
 
-After testing, switch Wireless debugging off on the TV. Keep the Docker volume to update in place with `install -r` and retain favorites and settings. To remove BananaLauncher, use the TV's Apps settings. See [AGENTS.md](AGENTS.md) for Docker cleanup.
+Run `./tv-emulator stop` before deleting `Emulator/`. Deleting the folder clears the SDK, JDK, virtual TV, installed test apps, and their data.
 
-### Test the Home button on the TCL
-
-Press **Home** on the remote to check the selection. Choose **Google TV** in **Settings → Apps → Default apps → Home app** to switch back on TVs that expose this setting.
-
-The debug build also includes the TCL Home redirect. To test it, hold **OK** on the gear in BananaLauncher and choose **Remote Home button**. In Accessibility, turn on **BananaLauncher Home redirect**. Press **Home** from another app to test it. The service also opens BananaLauncher once after each restart. Google TV may appear briefly as the redirect opens BananaLauncher. To reverse the redirect, turn off the same Accessibility service.
-
-On the TCL C89L, if the service stays enabled but stops working after a restart, allow TCL auto-start for BananaLauncher from the paired ADB session and restart again.
+## Build releases and install on a TV
 
 ```sh
-adb -s "$TV" shell cmd appops set tv.scenichome.launcher AUTO_START allow
-adb -s "$TV" shell cmd appops write-settings
+./dev Banama ./release-apk
+./dev Launcher ./release-apk
 ```
 
-## Update
+The scripts verify the signed APKs and write `Banama/artifacts/Banama.apk` and `Launcher/artifacts/BananaLauncher.apk`. Increment each app’s version code independently. The scripts use the distribution key in the Docker volume. Keep the matching signer for each app’s future updates.
 
-During a dependency review, check AndroidX and the pinned SDK toolchain for relevant changes. Rebuild and run the tests in Docker, then install over the previous APK using the same signing volume. Check remote focus, Google Play, and the Home hero on the TCL.
+For a physical TV development install, start `./dev Banama sh` or `./dev Launcher sh`. Use `adb pair` with the pairing endpoint and enter the pairing code interactively. Use `adb connect` with the separate endpoint from the main Wireless debugging screen. Install with `adb -s "$tv" install -r app/build/outputs/apk/debug/app-debug.apk`, substitute your TV endpoint for `$tv`, then disconnect and turn Wireless debugging off on the TV.
+
+## Retire the Docker toolchain
+
+Back up the signing files before removing the build volume.
+
+```sh
+docker buildx rm tv-android
+docker image rm tv-android-dev
+docker volume rm tv-android-home
+```

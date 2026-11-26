@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+workspace="$(cd "$(dirname "$0")" && pwd)"
+emulator_root="$workspace/Emulator"
+export JAVA_HOME="$emulator_root/jdk/Contents/Home"
+export ANDROID_HOME="$emulator_root/sdk" ANDROID_SDK_ROOT="$emulator_root/sdk"
+export ANDROID_USER_HOME="$emulator_root/state" ANDROID_EMULATOR_HOME="$emulator_root/state"
+export ANDROID_AVD_HOME="$emulator_root/state/avd" TMPDIR="$emulator_root/tmp"
+emulator="$ANDROID_HOME/emulator/emulator"
+serial=emulator-5564
+avd=Google_TV_API_36
+console_link="$HOME/.emulator_console_auth_token"
+console_token="$emulator_root/state/console-auth-token"
+
+console_running() {
+    nc -z -G 1 127.0.0.1 5564 >/dev/null 2>&1
+}
+
+console() {
+    {
+        if [ -s "$console_link" ]; then
+            printf 'auth %s\n' "$(cat "$console_link")"
+        fi
+        printf '%s\n' "$@" quit
+    } | nc -G 1 -w 3 127.0.0.1 5564 | tr -d '\r'
+}
+
+remove_console_link() {
+    if [ -L "$console_link" ] && [ "$(readlink "$console_link")" = "$console_token" ]; then
+        rm "$console_link" 2>/dev/null || [ ! -L "$console_link" ]
+    fi
+}
+
+docker_adb() {
+    docker run --rm -i --platform linux/amd64 \
+        --mount "type=bind,source=$emulator_root/state,target=/home/android/.android" \
+        --mount "type=bind,source=$workspace,target=/workspace,readonly" \
+        tv-android-dev "$@"
+}
+
+case "${1:-}" in
+    start)
+        if console_running; then
+            echo "Emulator console port 5564 is already in use." >&2
+            exit 1
+        fi
+        if [ ! -x "$emulator" ] || [ ! -f "$ANDROID_AVD_HOME/$avd.ini" ]; then
+            echo "Set up the Google TV emulator under Emulator/ as described in README.md." >&2
+            exit 1
+        fi
+        if [ ! -s "$ANDROID_USER_HOME/adbkey" ] || [ ! -s "$ANDROID_USER_HOME/adbkey.pub" ]; then
+            docker_adb adb keygen /home/android/.android/adbkey
+        fi
+        if [ ! -e "$console_link" ] && [ ! -L "$console_link" ]; then
+            # The emulator console reads this filename from the macOS user directory.
+            if [ ! -s "$console_token" ]; then
+                (umask 077 && openssl rand -hex 16 | tr -d '\n' > "$console_token")
+            fi
+            ln -s "$console_token" "$console_link"
+            trap remove_console_link EXIT
+        fi
+        echo "Starting $serial. See Emulator/emulator.log for boot output."
+        "$emulator" -avd "$avd" -port 5564 -no-snapshot -adb-path /usr/bin/false \
+            > "$emulator_root/emulator.log" 2>&1
+        ;;
+    stop)
+        if console_running; then
+            if ! console 'avd name' | grep -Fxq "$avd"; then
+                echo "Could not confirm $avd on emulator console port 5564." >&2
+                exit 1
+            fi
+            console kill | grep -F 'OK: killing emulator'
+            attempts=0
+            while console_running; do
+                if [ "$attempts" -ge 15 ]; then
+                    echo "The Google TV emulator is still shutting down." >&2
+                    exit 1
+                fi
+                attempts=$((attempts + 1))
+                sleep 1
+            done
+        fi
+        remove_console_link
+        ;;
+    adb)
+        shift
+        docker_adb sh -eu -c '
+            target=host.docker.internal:5565
+            adb start-server >/dev/null 2>&1
+            adb connect "$target" >/dev/null 2>&1 || true
+            attempts=0
+            until [ "$(adb -s "$target" get-state 2>/dev/null)" = device ]; do
+                if [ "$attempts" -ge 45 ]; then
+                    echo "The Google TV emulator is unavailable. See Emulator/emulator.log." >&2
+                    exit 1
+                fi
+                adb connect "$target" >/dev/null 2>&1 || true
+                attempts=$((attempts + 1))
+                sleep 1
+            done
+            exec adb -s "$target" "$@"
+        ' emulator-adb "$@"
+        ;;
+    *)
+        echo "Usage: ./tv-emulator {start|stop|adb [args...]}" >&2
+        exit 2
+        ;;
+esac

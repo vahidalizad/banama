@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Banama</string>
+    <string name="app_author">B4Banana</string>
+    <style name="Theme.Banama" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#16131D</item>
+        <item name="android:colorAccent">#F7BF2E</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

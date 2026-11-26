@@ -1,9 +1,13 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
+case "${1:-}" in
+    Banama|Launcher) project="$PWD/$1"; shift ;;
+    *) echo "Usage: ./dev {Banama|Launcher} command [args...]" >&2; exit 2 ;;
+esac
 tty_flag=
 if [ -t 0 ] && [ -t 1 ]; then tty_flag=-t; fi
 exec docker run --rm -i ${tty_flag:+"$tty_flag"} --platform linux/amd64 \
-  --mount "type=bind,source=$PWD,target=/workspace" \
+  --mount "type=bind,source=$project,target=/workspace" \
   --mount type=volume,source=tv-android-home,target=/home/android \
   tv-android-dev "$@"
