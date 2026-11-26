@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -106,6 +107,17 @@ private val mediaShape = RoundedCornerShape(14.dp)
 internal const val GOLD_EXPIRED = "No 30nama Gold days remaining"
 
 @Composable
+internal fun rememberArtwork(artwork: MediaArtwork, url: String?, size: Int, fallback: String? = null): Bitmap? {
+    val source = url ?: fallback ?: return null
+    return key(artwork, source, fallback, size) {
+        remember { artwork.cached(source, size) } ?: produceState<Bitmap?>(null) {
+            value = artwork.image(source, size)
+                ?: fallback?.takeUnless { it == source }?.let { artwork.image(it, size) }
+        }.value
+    }
+}
+
+@Composable
 private fun CatalogImage(
     media: MediaStore,
     url: String?,
@@ -114,11 +126,7 @@ private fun CatalogImage(
     scale: ContentScale = ContentScale.Crop,
     placeholder: @Composable () -> Unit = {},
 ) {
-    val bitmap by produceState<Bitmap?>(null, url, size) {
-        value = null
-        value = media.artwork.image(url, size)
-    }
-    val image = bitmap
+    val image = rememberArtwork(media.artwork, url, size)
     if (image != null) Image(remember(image) { image.asImageBitmap() }, null, modifier, contentScale = scale)
     else Box(modifier.background(panel), contentAlignment = Alignment.Center) { placeholder() }
 }
