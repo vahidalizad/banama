@@ -39,9 +39,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,6 +76,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 internal val ink = Color(0xFF101010)
@@ -112,14 +115,30 @@ internal fun BanamaHome(activity: MainActivity) {
     val heading = title
     val homeVisible = !pairing && heading == null && !searchOpen
     val visibleLibrary = searchLibrary.takeIf { searchOpen && heading == null && !pairing }
+    var homeRefreshed by remember { mutableStateOf(false) }
+    var upcomingRefreshed by remember(media.accountRevision, media.catalogRevision) { mutableStateOf(false) }
+    val readyForUpdateCheck by rememberUpdatedState(activity.foreground && homeVisible && homeRefreshed && upcomingRefreshed)
 
     LaunchedEffect(activity.foreground, media.accountRevision, homeVisible, visibleLibrary) {
         if (activity.foreground) while (true) {
-            delay(media.refresh(homeVisible, visibleLibrary))
+            val nextRefresh = media.refresh(homeVisible, visibleLibrary)
+            if (homeVisible) homeRefreshed = true
+            delay(nextRefresh)
         }
     }
+    val updates = activity.updates
+    LaunchedEffect(activity.launchCount) {
+        snapshotFlow { readyForUpdateCheck }.first { it }
+        updates.check()
+    }
+    LaunchedEffect(activity.foreground, updates.confirmation) {
+        if (activity.foreground) updates.showConfirmation(activity)
+    }
     LaunchedEffect(activity.foreground, homeVisible, media.accountRevision, media.catalogRevision) {
-        if (activity.foreground && homeVisible) media.refreshUpcoming()
+        if (activity.foreground && homeVisible) {
+            media.refreshUpcoming()
+            upcomingRefreshed = true
+        }
     }
     LaunchedEffect(activity.notice) {
         if (activity.notice != null) {
@@ -226,7 +245,8 @@ private fun HomeScreen(
         }
         if (media.suggestions.isNotEmpty()) add(Triple("suggested", "Suggested", media.suggestions))
     }
-    val headerTargets = listOf("home/search", "home/account")
+    val updates = activity.updates
+    val headerTargets = listOfNotNull("home/update".takeIf { updates.available != null }, "home/search", "home/account")
     val focusRows = (listOf(headerTargets, upcoming.map { heroKey(it.title.id) }) +
         shelves.flatMap { (key, _, titles) ->
             val library = MediaLibrary.entries.firstOrNull { it.key == key }
@@ -383,6 +403,13 @@ private fun HomeScreen(
                 Image(
                     painterResource(R.drawable.banama_header), stringResource(R.string.app_name),
                     Modifier.height(36.dp),
+                )
+            }
+            if (updates.available != null) {
+                Action(
+                    if (updates.installing) "Updating…" else "Update", updates::install,
+                    "home/update", move, focused, Modifier.width(136.dp), enabled = !updates.installing,
+                    icon = R.drawable.media_update, glassTint = headerGlass,
                 )
             }
             Action(

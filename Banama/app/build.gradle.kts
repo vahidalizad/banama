@@ -24,8 +24,8 @@ android {
         applicationId = "tv.scenichome.launcher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.1.15"
+        versionCode = 26
+        versionName = "1.1.16"
         buildConfigField("boolean", "BUNDLED_HEVC", bundledHevc.toString())
         buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
         buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))
@@ -60,6 +60,8 @@ android {
     if (bundledHevc) sourceSets.getByName("main").apply {
         assets.srcDirs("src/bundledHevc/assets", "../.gradle/decoder/assets")
         jniLibs.srcDir("../.gradle/decoder/jni")
+    } else {
+        sourceSets.getByName("release").manifest.srcFile("src/standardRelease/AndroidManifest.xml")
     }
 }
 

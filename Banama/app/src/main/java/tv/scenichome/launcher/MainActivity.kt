@@ -10,12 +10,17 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 class MainActivity : ComponentActivity() {
     internal val media by lazy { MediaStore(applicationContext) }
+    internal val updates by viewModels<BanamaUpdater>()
+    internal var launchCount by mutableIntStateOf(0)
+        private set
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
 
     internal var foreground by mutableStateOf(false)
@@ -34,6 +39,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { BanamaHome(this) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN) launchCount++
     }
 
     override fun onResume() {
