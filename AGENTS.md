@@ -5,3 +5,4 @@
 - Build and test each app with `./dev Banama` or `./dev Launcher` followed by its Gradle wrapper command. Keep the two app builds independent.
 - Test remote focus and app launches on the Google TV emulator. Target the real TV only for requested hardware checks. See the workspace README for setup and cleanup.
 - Keep `Emulator/`, generated APKs, local configuration, and keys out of Git.
+- Build on the existing apps and follow [CONTRIBUTING.md](CONTRIBUTING.md) when preparing changes for this repository.
