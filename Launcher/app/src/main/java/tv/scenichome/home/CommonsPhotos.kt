@@ -252,7 +252,7 @@ private fun download(url: String, limit: Int): ByteArray {
     connection.readTimeout = 8_000
     connection.instanceFollowRedirects = false
     connection.setRequestProperty("User-Agent",
-        "BananaLauncher/${BuildConfig.VERSION_NAME} (https://github.com/vahidalizad/my-tv-launcher)")
+        "BananaLauncher/${BuildConfig.VERSION_NAME} (https://github.com/vahidalizad/banama)")
     try {
         if (connection.responseCode != 200) throw IOException("Wikimedia returned ${connection.responseCode}")
         return connection.inputStream.use { input ->
