@@ -30,8 +30,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.tv.material3.Text
 
 private val avatarColors = listOf(Color(0xFF6C5DE0), Color(0xFF308176), Color(0xFFAC536C), Color(0xFF496FBE))
@@ -72,7 +70,7 @@ internal fun ProfileDialog(
     val focused: (String) -> Unit = { focusedAction = it }
     val shape = RoundedCornerShape(22.dp)
 
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.padding(horizontal = 24.dp).widthIn(max = 490.dp).fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xFF272438), Color(0xFF18171F))), shape)

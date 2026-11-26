@@ -30,8 +30,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.C
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -157,7 +155,7 @@ internal fun QualityPicker(
 ) {
     val rows = remember(choices) { choices.inPickerOrder() }
     var focused by remember { mutableStateOf<String?>(null) }
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.widthIn(max = 740.dp).fillMaxWidth(.9f).heightIn(max = 480.dp)
                 .background(panel, tileShape).border(1.dp, edge, tileShape).padding(24.dp)

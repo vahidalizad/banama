@@ -541,7 +541,6 @@ internal fun MediaPlayerScreen(
         credits -> "Skip credits"
         else -> null
     }
-    val chapterId = if (credits && nextEpisode != null) "player/next" else "player/chapter"
     LaunchedEffect(running, controls, dialog, interaction, scrubMs) {
         if (running && controls && dialog == null && scrubMs == null) {
             delay(6_000)
@@ -551,8 +550,8 @@ internal fun MediaPlayerScreen(
     LaunchedEffect(controls, ready, dialog, episode, chapterLabel, ended) {
         if (!ready || dialog != null) return@LaunchedEffect
         val focus = when {
-            !controls -> chapterId.takeIf { chapterLabel != null }
-            ended -> if (nextEpisode != null) "player/next" else "player/play"
+            !controls -> "player/chapter".takeIf { chapterLabel != null }
+            ended -> if (nextEpisode != null) "player/episodes" else "player/play"
             selected == "player/chapter" && chapterLabel == null -> "player/timeline"
             else -> selected
         }
@@ -723,23 +722,25 @@ internal fun MediaPlayerScreen(
                 )).padding(start = 40.dp, end = 40.dp, top = 28.dp, bottom = 22.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val heading = listOfNotNull(title.name, if (title.series) "S${episode.season} · E${episode.number}" else null)
-                Text(heading.joinToString("  "), fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Box(Modifier.fillMaxWidth().height(56.dp)) {
-                    if (nextEpisode != null && !(credits && chapterLabel == "Next episode")) {
-                        MediaIconButton(
-                            "Next episode", R.drawable.media_next_episode, "player/next", move, { selected = it },
-                            modifier = Modifier.align(Alignment.CenterStart).size(48.dp),
-                        ) { switchEpisode(nextEpisode) }
+                Row(
+                    Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(title.name, Modifier.weight(1f, fill = false).alignByBaseline(), fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (title.series) {
+                            Text("S${episode.season} · E${episode.number}", Modifier.alignByBaseline(),
+                                color = secondary, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        }
                     }
                     MediaIconButton(
                         if (playRequested) "Pause" else if (ended) "Replay" else "Play",
                         if (playRequested) R.drawable.media_pause else R.drawable.media_play,
                         "player/play", move, { selected = it },
-                        modifier = Modifier.align(Alignment.Center).size(56.dp), shape = CircleShape,
+                        modifier = Modifier.size(56.dp), shape = CircleShape,
                     ) { setPlaying(!player.playWhenReady || ended) }
-                    Row(Modifier.align(Alignment.CenterEnd), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                         MediaIconButton("Subtitles", R.drawable.media_subtitles, "player/subtitles", move, { selected = it }) {
                             dialog = "subtitles"
                         }
@@ -772,7 +773,7 @@ internal fun MediaPlayerScreen(
                     else -> seekTo(durationMs)
                 }
             },
-            chapterId, move, { selected = it },
+            "player/chapter", move, { selected = it },
             Modifier.align(Alignment.BottomEnd).padding(
                 end = 40.dp, bottom = if (controls) with(density) { controlsHeightPx.toDp() } + 12.dp else 26.dp,
             ),

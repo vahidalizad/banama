@@ -690,7 +690,7 @@ private fun MultiSelectFilters(
     val start = options.indexOfFirst { it.value in selection }.coerceAtLeast(0)
     val grid = rememberLazyGridState(initialFirstVisibleItemIndex = start)
     val target = FocusMove(options.getOrNull(start)?.let { "picker/${it.value}" } ?: "picker/clear", 0)
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.widthIn(max = 720.dp).fillMaxWidth(.9f).heightIn(max = 365.dp)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(20.dp),
@@ -808,6 +808,22 @@ private suspend fun namaQr(link: String): Bitmap = withContext(Dispatchers.Defau
 }
 
 @Composable
+internal fun BanamaDialog(close: () -> Unit, content: @Composable () -> Unit) {
+    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.onPreviewKeyEvent {
+            val key = it.nativeKeyEvent
+            when (key.keyCode) {
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
+                    if (key.action == KeyEvent.ACTION_UP && !key.isCanceled) close()
+                    true
+                }
+                else -> false
+            }
+        }, propagateMinConstraints = true) { content() }
+    }
+}
+
+@Composable
 internal fun MediaDialog(
     title: String,
     message: String?,
@@ -819,7 +835,7 @@ internal fun MediaDialog(
     val target = initial.coerceIn(0, (options.size - 1).coerceAtLeast(0))
     val list = rememberLazyListState(initialFirstVisibleItemIndex = target)
     var focusedAction by remember { mutableStateOf<String?>(null) }
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.widthIn(max = 510.dp).fillMaxWidth(.72f).heightIn(max = 425.dp)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(22.dp)
@@ -868,7 +884,7 @@ internal fun EpisodePicker(
     }.takeIf { it >= 0 } ?: 1
     var focused by remember(entries, initial) { mutableStateOf(entries[initial].second) }
     var focusOnOpen by remember(entries, initial) { mutableStateOf(true) }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(onClose) {
         BoxWithConstraints(
             Modifier.widthIn(max = 1040.dp).fillMaxWidth(.9f).heightIn(max = 590.dp).fillMaxHeight(.86f)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(horizontal = 24.dp, vertical = 18.dp),
@@ -878,7 +894,6 @@ internal fun EpisodePicker(
             val grid = rememberLazyGridState(if (initial - header <= columns * 3) header else initial)
             Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Episodes", fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
-                lastPlayed?.let { Text(it.label(true), color = foreground, fontSize = 16.sp) }
                 Text(
                     focused?.let {
                         val number = if (it.number > 0) "Episode ${it.number}" else "Special"
