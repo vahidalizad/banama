@@ -9,12 +9,14 @@ import org.junit.Test
 class LauncherPolicyTest {
     @Test
     fun homeStatusUsesTheActualDestinationEvenWhenTheRoleIsHeld() {
-        assertEquals("BananaLauncher is selected. This TV sends Home to Google TV.",
+        assertEquals("BananaLauncher holds the Home role. Android resolves Home to Google TV.",
             homeRouteDescription(opensHere = false, roleHeld = true, destination = "Google TV"))
         assertEquals("Choose a default Home app in TV settings.",
             homeRouteDescription(opensHere = false, roleHeld = true, destination = null))
-        assertEquals("Android opens BananaLauncher for Home.",
+        assertEquals("BananaLauncher is the default Home app.",
             homeRouteDescription(opensHere = true, roleHeld = false, destination = "BananaLauncher"))
+        assertEquals("Google TV is the default Home app.",
+            homeRouteDescription(opensHere = false, roleHeld = false, destination = "Google TV"))
     }
 
     @Test

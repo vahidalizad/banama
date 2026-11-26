@@ -1,14 +1,15 @@
 import java.util.Properties
 
 plugins {
-    id("com.android.application") version "8.9.2"
-    id("org.jetbrains.kotlin.android") version "2.1.20"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.1.20"
+    id("com.android.application") version "9.5.3"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.21"
 }
 
 val local = Properties().apply {
     rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
 }
+val bundledHevc = providers.gradleProperty("bundledHevc").orNull == "true"
+val media3Version = "1.11.1"
 
 fun localString(name: String, fallback: String = ""): String =
     "\"" + local.getProperty(name, fallback).trim().replace("\\", "\\\\").replace("\"", "\\\"")
@@ -16,15 +17,16 @@ fun localString(name: String, fallback: String = ""): String =
 
 android {
     namespace = "tv.scenichome.launcher"
-    compileSdk = 35
-    buildToolsVersion = "35.0.0"
+    compileSdk { version = release(37) { minorApiLevel = 1 } }
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "tv.scenichome.launcher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.1.6"
+        versionCode = 25
+        versionName = "1.1.15"
+        buildConfigField("boolean", "BUNDLED_HEVC", bundledHevc.toString())
         buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
         buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))
     }
@@ -54,19 +56,29 @@ android {
         compose = true
         buildConfig = true
     }
+    packaging.resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+    if (bundledHevc) sourceSets.getByName("main").apply {
+        assets.srcDirs("src/bundledHevc/assets", "../.gradle/decoder/assets")
+        jniLibs.srcDir("../.gradle/decoder/jni")
+    }
 }
 
 kotlin { jvmToolchain(17) }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2025.04.01"))
-    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.tv:tv-material:1.0.0")
-    implementation("androidx.media3:media3-exoplayer:1.6.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.6.1")
-    implementation("androidx.media3:media3-ui:1.6.1")
-    implementation("com.google.zxing:core:3.5.3")
+    implementation("androidx.tv:tv-material:1.1.0")
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
+    implementation("androidx.media3:media3-ui:$media3Version")
+    if (bundledHevc) {
+        val decoder = rootProject.file(".gradle/decoder/nextlib-decoder.jar")
+        check(decoder.isFile) { "Build the bundled decoder with ./dev Banama ./release-apk --bundled-hevc" }
+        implementation(files(decoder))
+    }
+    implementation("com.google.zxing:core:3.5.4")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20250107")
+    testImplementation("org.json:json:20260814")
 }

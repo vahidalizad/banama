@@ -44,6 +44,8 @@ Use the keyboard arrows, Enter, and Back in the emulator window, or send key eve
 ./tv-emulator adb shell am start -n tv.scenichome.launcher/.MainActivity
 ```
 
+To test Home on this Google TV image, enable **Launcher settings → Home button fallback** in the debug build, open Banama, and press **Home** on the emulator remote. This image routes the standard Home role to its built-in launcher. [Home button fallback setup](Launcher/README.md#debug-home-button-fallback)
+
 Save checks of the physical Home button, TCL firmware, and hardware playback for the real TV.
 
 ### Recreate the emulator folder
@@ -62,6 +64,7 @@ export ANDROID_AVD_HOME="$emulator_root/state/avd" TMPDIR="$emulator_root/tmp"
   emulator platform-tools 'system-images;android-36;google-tv;arm64-v8a'
 printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
   create avd -n Google_TV_API_36 -k 'system-images;android-36;google-tv;arm64-v8a' -d tv_1080p
+sed -i '' 's/^hw\.keyboard=no$/hw.keyboard=yes/' "$ANDROID_AVD_HOME/Google_TV_API_36.avd/config.ini"
 ```
 
 Run `./tv-emulator stop` before deleting `Emulator/`. Deleting the folder clears the SDK, JDK, virtual TV, installed test apps, and their data.

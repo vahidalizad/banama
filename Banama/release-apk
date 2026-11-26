@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-./gradlew --no-daemon :app:assembleRelease
+output=Banama.apk
+case "$#:${1:-}" in
+    0:) ;;
+    1:--bundled-hevc) output=Banama-bundled-hevc.apk; set -- -PbundledHevc=true ;;
+    *) echo "Usage: ./release-apk [--bundled-hevc]" >&2; exit 2 ;;
+esac
+./gradlew --no-daemon :app:assembleRelease "$@"
 
 apk=app/build/outputs/apk/release/app-release.apk
-tools="$ANDROID_HOME/build-tools/35.0.0"
+tools="$ANDROID_HOME/build-tools/37.0.0"
 "$tools/apksigner" verify "$apk"
 badging=$("$tools/aapt" dump badging "$apk")
 case "$badging" in
@@ -17,9 +23,18 @@ case "$badging" in
         exit 1 ;;
 esac
 
+if [ "$output" = Banama-bundled-hevc.apk ]; then
+    for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+        unzip -Z1 "$apk" "lib/$abi/libmedia3ext.so" >/dev/null || {
+            echo "Bundled decoder missing for $abi" >&2
+            exit 1
+        }
+    done
+fi
+
 mkdir -p artifacts
 temp=$(mktemp artifacts/.Banama.XXXXXX)
 trap 'rm -f "$temp"' EXIT
 install -m 644 "$apk" "$temp"
-mv -f "$temp" artifacts/Banama.apk
-echo "Ready to send: artifacts/Banama.apk"
+mv -f "$temp" "artifacts/$output"
+echo "Signed APK: artifacts/$output"

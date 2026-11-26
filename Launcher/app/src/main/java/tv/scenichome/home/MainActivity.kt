@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -23,12 +22,14 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.Collator
+import kotlin.math.roundToInt
 
 internal data class TvApp(
     val pkg: String,
@@ -139,13 +140,26 @@ class MainActivity : ComponentActivity() {
         }.distinctBy { it.pkg }
     }
 
-    internal suspend fun iconFor(app: TvApp): Bitmap? = withContext(Dispatchers.IO) {
+    internal suspend fun artworkFor(app: TvApp, preferBanner: Boolean = false): Bitmap? = withContext(Dispatchers.IO) {
+        if (preferBanner) {
+            val banner = runCatching {
+                packageManager.getActivityBanner(app.component)?.let { drawable ->
+                    val width = drawable.intrinsicWidth
+                    val height = drawable.intrinsicHeight
+                    if (width > height && height > 0) {
+                        val scale = minOf(320f / width, 180f / height)
+                        drawable.toBitmap((width * scale).roundToInt(), (height * scale).roundToInt().coerceAtLeast(1))
+                    } else if (width <= 0 || height <= 0) {
+                        drawable.toBitmap(320, 180)
+                    } else {
+                        null
+                    }
+                }
+            }.getOrNull()
+            if (banner != null) return@withContext banner
+        }
         runCatching {
-            val icon = packageManager.getActivityIcon(app.component)
-            val image = Bitmap.createBitmap(112, 112, Bitmap.Config.ARGB_8888)
-            icon.setBounds(0, 0, image.width, image.height)
-            icon.draw(Canvas(image))
-            image
+            packageManager.getActivityIcon(app.component).toBitmap(112, 112)
         }.getOrNull()
     }
 

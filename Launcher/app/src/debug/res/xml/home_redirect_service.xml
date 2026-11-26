@@ -4,4 +4,4 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="false"
     android:description="@string/home_redirect_description"
-    android:packageNames="com.google.android.apps.tv.launcherx" />
+    android:packageNames="tv.scenichome.home" />

@@ -5,6 +5,16 @@ case "${1:-}" in
     Banama|Launcher) project="$PWD/$1"; shift ;;
     *) echo "Usage: ./dev {Banama|Launcher} command [args...]" >&2; exit 2 ;;
 esac
+if [ "${project##*/}" = Banama ]; then
+    for arg do
+        case "$arg" in
+            --bundled-hevc|-PbundledHevc=true)
+                docker buildx build --platform linux/amd64 \
+                    --output "type=local,dest=$project/.gradle/decoder" "$project/decoder"
+                break ;;
+        esac
+    done
+fi
 tty_flag=
 if [ -t 0 ] && [ -t 1 ]; then tty_flag=-t; fi
 exec docker run --rm -i ${tty_flag:+"$tty_flag"} --platform linux/amd64 \

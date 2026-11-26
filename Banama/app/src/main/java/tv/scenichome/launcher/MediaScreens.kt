@@ -78,12 +78,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -130,6 +133,7 @@ internal fun EpisodeHero(
     open: (UpcomingEpisode) -> Unit,
     options: (UpcomingEpisode) -> Unit,
     showOptionsHint: Boolean,
+    modifier: Modifier,
 ) {
     val row = rememberLazyListState()
     LaunchedEffect(move) {
@@ -137,7 +141,7 @@ internal fun EpisodeHero(
         if (index >= 0 && row.layoutInfo.visibleItemsInfo.none { it.index == index }) row.scrollToItem(index)
     }
     Column(
-        Modifier.widthIn(max = 696.dp).fillMaxWidth(),
+        modifier.widthIn(max = 696.dp).fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(selected.title.name, fontSize = 23.sp, fontWeight = FontWeight.SemiBold,
@@ -149,7 +153,15 @@ internal fun EpisodeHero(
                 "Resume ${clockTime(it.timeMs / 1000)}",
             ).joinToString(" · ")
         } ?: selected.episode.label()
-        Text(if (showOptionsHint) "$caption · Hold OK for options" else caption, color = foreground, fontSize = 14.sp)
+        Text(
+            buildAnnotatedString {
+                append(caption)
+                if (showOptionsHint) withStyle(SpanStyle(color = secondary, fontSize = 10.sp)) {
+                    append("  ·  Hold OK for options")
+                }
+            },
+            color = foreground, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
         LazyRow(
             state = row, modifier = Modifier.fillMaxWidth().padding(top = 4.dp).focusGroup(),
             contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
@@ -678,7 +690,7 @@ private fun MultiSelectFilters(
     val start = options.indexOfFirst { it.value in selection }.coerceAtLeast(0)
     val grid = rememberLazyGridState(initialFirstVisibleItemIndex = start)
     val target = FocusMove(options.getOrNull(start)?.let { "picker/${it.value}" } ?: "picker/clear", 0)
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.widthIn(max = 720.dp).fillMaxWidth(.9f).heightIn(max = 365.dp)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(20.dp),
@@ -796,6 +808,22 @@ private suspend fun namaQr(link: String): Bitmap = withContext(Dispatchers.Defau
 }
 
 @Composable
+internal fun BanamaDialog(close: () -> Unit, content: @Composable () -> Unit) {
+    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.onPreviewKeyEvent {
+            val key = it.nativeKeyEvent
+            when (key.keyCode) {
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
+                    if (key.action == KeyEvent.ACTION_UP && !key.isCanceled) close()
+                    true
+                }
+                else -> false
+            }
+        }, propagateMinConstraints = true) { content() }
+    }
+}
+
+@Composable
 internal fun MediaDialog(
     title: String,
     message: String?,
@@ -807,7 +835,7 @@ internal fun MediaDialog(
     val target = initial.coerceIn(0, (options.size - 1).coerceAtLeast(0))
     val list = rememberLazyListState(initialFirstVisibleItemIndex = target)
     var focusedAction by remember { mutableStateOf<String?>(null) }
-    Dialog(onDismissRequest = close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(close) {
         Column(
             Modifier.widthIn(max = 510.dp).fillMaxWidth(.72f).heightIn(max = 425.dp)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(22.dp)
@@ -856,7 +884,7 @@ internal fun EpisodePicker(
     }.takeIf { it >= 0 } ?: 1
     var focused by remember(entries, initial) { mutableStateOf(entries[initial].second) }
     var focusOnOpen by remember(entries, initial) { mutableStateOf(true) }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    BanamaDialog(onClose) {
         BoxWithConstraints(
             Modifier.widthIn(max = 1040.dp).fillMaxWidth(.9f).heightIn(max = 590.dp).fillMaxHeight(.86f)
                 .background(panel, mediaShape).border(1.dp, edge, mediaShape).padding(horizontal = 24.dp, vertical = 18.dp),
@@ -866,7 +894,6 @@ internal fun EpisodePicker(
             val grid = rememberLazyGridState(if (initial - header <= columns * 3) header else initial)
             Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Episodes", fontSize = 27.sp, fontWeight = FontWeight.SemiBold)
-                lastPlayed?.let { Text(it.label(true), color = foreground, fontSize = 16.sp) }
                 Text(
                     focused?.let {
                         val number = if (it.number > 0) "Episode ${it.number}" else "Special"
@@ -1039,21 +1066,12 @@ internal fun MediaTitleScreen(
                     .size(142.dp, 213.dp).clip(mediaShape), 480,
             )
         }
-        FocusSurface(
-            "title/play", actionFocus, { focusedAction = it },
-            {
-                if (!media.configured || (!media.connected && !title.freeStream && !title.freeDownload)) onConnect()
-                else scope.launch { startPlayback() }
-            },
-            Modifier.align(Alignment.Center).size(76.dp).semantics { contentDescription = "Play" },
-            enabled = !busy, glassShape = CircleShape,
+        MediaIconButton(
+            "Play", R.drawable.media_play, "title/play", actionFocus, { focusedAction = it },
+            enabled = !busy, modifier = Modifier.align(Alignment.Center).size(64.dp),
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Box(Modifier.size(57.dp).border(2.dp, foreground, CircleShape), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.media_play), null, Modifier.size(38.dp),
-                        colorFilter = ColorFilter.tint(Color(0xFFFA605B)))
-                }
-            }
+            if (!media.configured || (!media.connected && !title.freeStream && !title.freeDownload)) onConnect()
+            else scope.launch { startPlayback() }
         }
         Column(
             Modifier.align(Alignment.CenterEnd).padding(end = margin)

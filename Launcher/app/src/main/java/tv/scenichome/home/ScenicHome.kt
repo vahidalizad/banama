@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,6 +37,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -46,18 +48,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -89,7 +105,13 @@ private val secondary = Color(0xFFCBCBCB)
 private val edge = Color(0xFF585858)
 private val dockShape = RoundedCornerShape(24.dp)
 private val tileShape = RoundedCornerShape(12.dp)
-private val glassTile = RoundedCornerShape(16.dp)
+private val dockRadius = 16.dp
+private val glassTile = RoundedCornerShape(dockRadius)
+private val dockGlass = Color(0x4D161616)
+private val dockHighlight = Brush.verticalGradient(
+    0f to Color(0x16FFFFFF), .55f to Color.Transparent, 1f to Color(0x26000000),
+)
+private val mutedIcon = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(.2f) })
 private data class FocusMove(val id: String, val revision: Int)
 private data class Setting(
     val key: String,
@@ -132,6 +154,7 @@ private fun LauncherScreen(activity: MainActivity) {
     var focusOnSwitch by remember { mutableStateOf<String?>(null) }
     var sequence by remember { mutableIntStateOf(0) }
     var move by remember { mutableStateOf<FocusMove?>(null) }
+    val dockBounds = remember { mutableStateMapOf<String, Rect>() }
 
     val apps = activity.apps
     val dock = remember(apps, activity.pinned, activity.recent) {
@@ -189,7 +212,9 @@ private fun LauncherScreen(activity: MainActivity) {
         val compact = maxHeight < 480.dp
         val top = if (compact) 18.dp else 26.dp
 
-        SceneBackdrop(slide?.image, Modifier.fillMaxSize())
+        SceneBackdrop(slide, Modifier.fillMaxSize()) {
+            if (appsOpen) emptyList() else dockTargets.mapNotNull(dockBounds::get)
+        }
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
             0f to Color(0xA0000000), .30f to Color(0x24000000), .57f to Color(0x10000000),
             1f to Color(0xEC101010),
@@ -210,7 +235,7 @@ private fun LauncherScreen(activity: MainActivity) {
                 items(apps, key = ::shelfKey) { app ->
                     AppTile(
                         activity, app, shelfKey(app), move, focused, if (compact) 86.dp else 96.dp,
-                        onClick = { activity.open(app) }, onLong = { appMenu = app }, flat = true,
+                        onClick = { activity.open(app) }, onLong = { appMenu = app },
                     )
                 }
                 if (apps.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
@@ -219,8 +244,9 @@ private fun LauncherScreen(activity: MainActivity) {
             }
         } else {
             FavoritesRow(
-                activity, dock, compact, if (compact) 88.dp else 106.dp, move, focused,
-                Modifier.align(Alignment.BottomStart).padding(start = margin, end = margin, bottom = 34.dp),
+                activity, dock, compact, lastFocus, move, focused,
+                Modifier.align(Alignment.BottomCenter).padding(start = margin, end = margin, bottom = 26.dp),
+                onTilePlaced = { id, bounds -> dockBounds[id] = bounds },
                 onApps = {
                     focusOnSwitch = apps.firstOrNull()?.let(::shelfKey) ?: "home/settings"
                     appsOpen = true
@@ -251,8 +277,8 @@ private fun LauncherScreen(activity: MainActivity) {
         OptionsDialog("Launcher settings", activity.homeStatus, buildList {
             add(Setting("tv-settings", "TV settings", run = activity::tvSettings))
             add(Setting("default-home", "Default Home app", run = activity::defaultHomeSettings))
+            if (BuildConfig.DEBUG) add(Setting("home-fallback", "Home button fallback", run = activity::homeButtonSettings))
             add(Setting("credits", "Photo credits") { credits = true })
-            if (BuildConfig.DEBUG) add(Setting("home-button", "Remote Home button", run = activity::homeButtonSettings))
         }) { settings = false }
     }
     if (credits) {
@@ -282,22 +308,35 @@ private fun PhotoCredits(photo: CommonsPhoto?, openLink: (String) -> Unit, close
 }
 
 @Composable
-private fun SceneBackdrop(artwork: Bitmap?, modifier: Modifier) {
+private fun SceneBackdrop(slide: CommonsSlide?, modifier: Modifier, glassBounds: () -> List<Rect>) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val motion = remember {
         Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f
     }
     Crossfade(
-        targetState = artwork,
+        targetState = slide,
         modifier = modifier.clipToBounds(),
         animationSpec = tween(if (motion) 480 else 0),
         label = "Commons backdrop",
-    ) { image ->
-        if (image != null) {
-            Image(
-                image.asImageBitmap(), null, Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
+    ) { frame ->
+        if (frame != null) {
+            Box(Modifier.fillMaxSize()) {
+                Image(
+                    frame.image.asImageBitmap(), null, Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+                Image(
+                    frame.frosted.asImageBitmap(), null,
+                    Modifier.matchParentSize().drawWithCache {
+                        val radius = CornerRadius(dockRadius.toPx())
+                        val mask = Path().apply {
+                            glassBounds().forEach { addRoundRect(RoundRect(it, radius)) }
+                        }
+                        onDrawWithContent { clipPath(mask) { this@onDrawWithContent.drawContent() } }
+                    },
+                    contentScale = ContentScale.Crop,
+                )
+            }
         } else {
             Spacer(Modifier.fillMaxSize().background(ink))
         }
@@ -309,38 +348,85 @@ private fun FavoritesRow(
     activity: MainActivity,
     dock: List<TvApp>,
     compact: Boolean,
-    height: Dp,
+    focusedId: String?,
     move: FocusMove?,
     onFocused: (String) -> Unit,
     modifier: Modifier,
+    onTilePlaced: (String, Rect) -> Unit,
     onApps: () -> Unit,
     onMenu: (TvApp) -> Unit,
 ) {
     Row(
-        modifier.widthIn(max = 820.dp).fillMaxWidth(),
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
     ) {
         dock.forEach { app ->
             androidx.compose.runtime.key(app.pkg) {
-                AppTile(
-                    activity, app, dockKey(app), move, onFocused, height,
-                    onClick = { activity.open(app) },
-                    onLong = { onMenu(app) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-        repeat(MAX_FAVORITES - dock.size) { Spacer(Modifier.weight(1f)) }
-        FocusSurface(
-            "home/apps", move, onFocused, onApps, Modifier.weight(1f).height(height),
-            glassShape = glassTile,
-        ) {
-            TileCaption("All apps") {
-                Box(Modifier.size(if (compact) 38.dp else 46.dp), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.home_apps), null, Modifier.size(if (compact) 30.dp else 35.dp))
+                val id = dockKey(app)
+                val focused = focusedId == id
+                val artwork by produceState<Bitmap?>(null, app.component) {
+                    value = activity.artworkFor(app, preferBanner = true)
+                }
+                DockTile(
+                    app.label, id, focused, move, onFocused, { activity.open(app) }, Modifier.weight(1f),
+                    onTilePlaced = onTilePlaced,
+                    onLongClick = { onMenu(app) },
+                ) {
+                    val bitmap = artwork
+                    val imageModifier = if (bitmap != null && bitmap.width > bitmap.height) {
+                        Modifier.fillMaxSize()
+                    } else {
+                        Modifier.fillMaxHeight(.6f).aspectRatio(1f).clip(tileShape)
+                    }
+                    Image(
+                        appPainter(bitmap), null, imageModifier,
+                        alpha = if (focused) .84f else .64f,
+                        colorFilter = if (focused) null else mutedIcon,
+                    )
                 }
             }
         }
+        repeat(MAX_FAVORITES - dock.size) { Spacer(Modifier.weight(1f)) }
+        DockTile(
+            "All apps", "home/apps", focusedId == "home/apps", move, onFocused, onApps, Modifier.weight(1f),
+            onTilePlaced = onTilePlaced,
+        ) {
+            Image(painterResource(R.drawable.home_apps), null, Modifier.fillMaxHeight(.42f).aspectRatio(1f))
+        }
+    }
+}
+
+@Composable
+private fun DockTile(
+    label: String,
+    id: String,
+    focused: Boolean,
+    move: FocusMove?,
+    onFocused: (String) -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    onTilePlaced: (String, Rect) -> Unit,
+    onLongClick: (() -> Unit)? = null,
+    artwork: @Composable () -> Unit,
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        FocusSurface(
+            id, move, onFocused, onClick,
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                .onGloballyPositioned { onTilePlaced(id, it.boundsInRoot()) }
+                .semantics { contentDescription = label },
+            glassShape = glassTile, fill = dockGlass, onLongClick = onLongClick,
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                artwork()
+                Spacer(Modifier.matchParentSize().background(dockHighlight))
+            }
+        }
+        Text(
+            label, Modifier.padding(top = 6.dp).clearAndSetSemantics {},
+            color = if (focused) foreground else Color.Transparent,
+            fontSize = 14.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -358,7 +444,7 @@ private fun HomeAction(
         glassShape = tileShape,
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Image(painterResource(icon), label, Modifier.size(24.dp))
+            Image(painterResource(icon), label, Modifier.size(24.dp), colorFilter = mutedIcon)
         }
     }
 }
@@ -394,38 +480,30 @@ private fun AppTile(
     height: Dp,
     onClick: () -> Unit,
     onLong: () -> Unit,
-    modifier: Modifier = Modifier,
-    flat: Boolean = false,
 ) {
-    val icon by produceState<Bitmap?>(null, app.component) { value = activity.iconFor(app) }
-    val bitmap = icon
+    val icon by produceState<Bitmap?>(null, app.component) { value = activity.artworkFor(app) }
     FocusSurface(
         id, move, onFocused, onClick,
-        modifier.fillMaxWidth().height(height), onLongClick = onLong,
-        glassShape = if (flat) null else glassTile,
-        fill = if (flat) Color(0xFF2B2B2B) else null,
+        Modifier.fillMaxWidth().height(height), onLongClick = onLong,
+        fill = Color(0xFF2B2B2B),
     ) {
-        TileCaption(app.label) {
-            if (bitmap != null) {
-                val size = Modifier.size(if (height < 90.dp) 38.dp else 46.dp)
-                Image(bitmap.asImageBitmap(), null, size.clip(RoundedCornerShape(9.dp)))
-            } else {
-                Image(painterResource(R.drawable.banana_icon), null, Modifier.size(38.dp))
-            }
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
+        ) {
+            val iconSize = if (height < 90.dp) 38.dp else 46.dp
+            Image(appPainter(icon), null, Modifier.size(iconSize).clip(RoundedCornerShape(9.dp)))
+            Text(app.label, fontSize = 14.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
-private fun TileCaption(label: String, icon: @Composable () -> Unit) {
-    Column(
-        Modifier.fillMaxSize().padding(6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
-    ) {
-        icon()
-        Text(label, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
+private fun appPainter(bitmap: Bitmap?) = if (bitmap != null) {
+    remember(bitmap) { BitmapPainter(bitmap.asImageBitmap()) }
+} else {
+    painterResource(R.drawable.banana_icon)
 }
 
 @Composable
@@ -466,6 +544,7 @@ private fun FocusSurface(
     val shape = glassShape ?: tileShape
     val contentShowsFocus = fill == Color.Transparent
     val transparentFocus = glassShape != null || contentShowsFocus
+    val surfaceColor = fill ?: if (glassShape != null) Color(0xAB161616) else Color(0xFF303030)
     LaunchedEffect(move, enabled) {
         if (move?.id == id && enabled) {
             withFrameNanos { }
@@ -481,9 +560,9 @@ private fun FocusSurface(
         },
         shape = ClickableSurfaceDefaults.shape(shape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (glassShape != null) Color(0xAB161616) else fill ?: Color(0xFF303030),
+            containerColor = surfaceColor,
             contentColor = foreground,
-            focusedContainerColor = if (glassShape != null) Color(0xAB161616) else if (contentShowsFocus) Color.Transparent else focusColor,
+            focusedContainerColor = if (transparentFocus) surfaceColor else focusColor,
             focusedContentColor = if (transparentFocus) foreground else ink,
             pressedContainerColor = when {
                 contentShowsFocus -> Color.Transparent
@@ -501,11 +580,7 @@ private fun FocusSurface(
                 BorderStroke(if (glassShape != null) 1.5.dp else 2.dp, Color.White), shape = shape,
             ),
         ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = when {
-            contentShowsFocus -> 1f
-            glassShape != null -> 1.045f
-            else -> 1.025f
-        }),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = if (transparentFocus) 1f else 1.025f),
     ) { content() }
 }
 

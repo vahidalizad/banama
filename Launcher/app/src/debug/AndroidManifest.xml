@@ -3,7 +3,7 @@
     <application>
         <service
             android:name=".HomeRedirectService"
-            android:exported="true"
+            android:exported="false"
             android:label="@string/home_redirect_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>

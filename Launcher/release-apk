@@ -13,7 +13,7 @@ case "$badging" in
 esac
 case "$badging" in
     *"provides-component:'accessibility'"*|*"application-debuggable"*)
-        echo "The shareable APK contains the developer Home redirect or is debuggable." >&2
+        echo "The shareable APK contains an accessibility service or is debuggable." >&2
         exit 1 ;;
 esac
 

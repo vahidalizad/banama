@@ -1,9 +1,10 @@
 package tv.scenichome.launcher
 
 import android.graphics.Typeface
-import android.net.Uri
 import android.util.TypedValue
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
@@ -34,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,39 +62,34 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
+import androidx.media3.common.text.Cue
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.Log
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Text
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import kotlin.math.roundToInt
-
-private enum class Source { HLS, FIND_DOWNLOAD, DOWNLOAD, HD, RENEW_STREAM, UNAVAILABLE }
-
-private data class TextTrack(val group: Tracks.Group, val index: Int, val name: String, val preference: String)
-private data class VideoQuality(val source: Source, val height: Int = 0) {
-    val label get() = when (source) {
-        Source.DOWNLOAD -> "4K Download"
-        Source.HLS -> "4K Stream"
-        else -> "${height}p"
-    }
-}
 
 private const val SEEK_JUMP = 10_000L
 private const val SUBTITLE_TEXT_FRACTION = .045f
@@ -108,64 +105,6 @@ internal fun subtitleBottomInsets(viewHeight: Int, subtitleHeight: Int, overlayH
     return inset to extra
 }
 
-private fun Tracks.Group.videoHeight(index: Int): Int? {
-    val format = getTrackFormat(index)
-    if (!isTrackSupported(index) || format.width <= 0 || format.height <= 0) return null
-    return if (isUhd(format.width, format.height)) 2160 else format.height
-}
-
-private fun Tracks.videoQualities(): List<Int> =
-    groups.filter { it.type == C.TRACK_TYPE_VIDEO }
-        .flatMap { group -> (0 until group.length).mapNotNull(group::videoHeight) }.distinct().sortedDescending()
-
-private fun Tracks.videoOverride(source: Source, hdHeight: Int?): TrackSelectionOverride? =
-    groups.filter { it.type == C.TRACK_TYPE_VIDEO }.flatMap { group ->
-        (0 until group.length).filter { index ->
-            val height = group.videoHeight(index) ?: return@filter false
-            if (source == Source.HD) height < 2160 && (hdHeight == null || hdHeight == height) else height == 2160
-        }.map { group to it }
-    }.maxWithOrNull(compareBy(
-        { (group, index) -> group.videoHeight(index) ?: 0 },
-        { (group, index) -> group.getTrackFormat(index).bitrate },
-        { (group, index) -> group.getTrackFormat(index).width },
-    ))?.let { (group, index) -> TrackSelectionOverride(group.mediaTrackGroup, index) }
-
-private fun Caption.subtitle(): MediaItem.SubtitleConfiguration {
-    val path = httpsUri(url)?.path.orEmpty().lowercase(Locale.ROOT)
-    val mime = when {
-        path.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
-        path.endsWith(".ass") || path.endsWith(".ssa") -> MimeTypes.TEXT_SSA
-        path.endsWith(".ttml") || path.endsWith(".xml") -> MimeTypes.APPLICATION_TTML
-        else -> MimeTypes.TEXT_VTT
-    }
-    return MediaItem.SubtitleConfiguration.Builder(Uri.parse(url)).setMimeType(mime).setLanguage(language).build()
-}
-
-internal fun subtitlePreferenceKey(language: String?, name: String): String {
-    val primary = language.orEmpty().trim().lowercase(Locale.ROOT).substringBefore('-').substringBefore('_')
-    return when (primary) {
-        "eng" -> "en"
-        "fas", "per" -> "fa"
-        "", "und" -> when (name.trim().lowercase(Locale.ROOT).takeWhile(Char::isLetter)) {
-            "english" -> "en"
-            "persian", "farsi", "فارسی", "فارسي" -> "fa"
-            else -> "label:$name"
-        }
-        else -> primary
-    }
-}
-
-private fun Tracks.textTracks(): List<TextTrack> = groups.flatMap { group ->
-    if (group.type != C.TRACK_TYPE_TEXT) return@flatMap emptyList()
-    (0 until group.length).filter(group::isTrackSupported).map { index ->
-        val format = group.getTrackFormat(index)
-        val name = format.label ?: format.language?.let {
-            Locale.forLanguageTag(it).getDisplayLanguage(Locale.getDefault()).ifBlank { it }
-        } ?: "Subtitle ${index + 1}"
-        TextTrack(group, index, name, subtitlePreferenceKey(format.language, name))
-    }
-}
-
 @OptIn(UnstableApi::class)
 @Composable
 internal fun MediaPlayerScreen(
@@ -176,36 +115,56 @@ internal fun MediaPlayerScreen(
     onEpisode: (MediaEpisode) -> Unit,
     onClose: () -> Unit,
 ) {
+    var primaryCues by remember { mutableStateOf<List<Cue>>(emptyList()) }
+    var secondaryCues by remember { mutableStateOf<List<Cue>>(emptyList()) }
+    val captionSelector = remember { CaptionTrackSelector(activity) }
+    val persianTypeface = remember { activity.resources.getFont(R.font.shabnam_regular) }
+    val renderers = remember {
+        CaptionRenderers(activity, object : TextOutput {
+            override fun onCues(cueGroup: CueGroup) { secondaryCues = cueGroup.cues }
+        })
+    }
     val player = remember {
         Log.setLogLevel(Log.LOG_LEVEL_OFF)
-        ExoPlayer.Builder(activity).build()
+        val extractors = HevcBaseLayerExtractors({ renderers.route.hevcBase })
+        ExoPlayer.Builder(activity, renderers).setTrackSelector(captionSelector)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(activity, extractors)).build().also { exo ->
+                if (BuildConfig.DEBUG) exo.addAnalyticsListener(object : AnalyticsListener {
+                    override fun onVideoSizeChanged(eventTime: AnalyticsListener.EventTime, videoSize: VideoSize) {
+                        android.util.Log.i("BanamaDecoder", "Video size: ${videoSize.width}x${videoSize.height}")
+                    }
+
+                    override fun onVideoDecoderInitialized(
+                        eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long,
+                        initializationDurationMs: Long,
+                    ) {
+                        android.util.Log.i("BanamaDecoder", "Video decoder: $decoderName")
+                    }
+                })
+            }
     }
-    var source by remember(episode) { mutableStateOf(if (episode.hls == null) Source.FIND_DOWNLOAD else Source.HLS) }
-    var retainedHls by remember(episode) { mutableStateOf(false) }
     var streamEpisode by remember(episode) { mutableStateOf(episode) }
-    var renewedSource by remember(episode) { mutableStateOf<Source?>(null) }
-    var renewDownloads by remember(episode) { mutableStateOf(false) }
-    var candidate by remember(episode) { mutableStateOf<DownloadVideo?>(null) }
     val downloadLookup = remember(episode) { Mutex() }
     var downloadOptions by remember(episode) { mutableStateOf<List<DownloadVideo>?>(null) }
-    var nextDownload by remember(episode) { mutableIntStateOf(0) }
-    var hlsQualities by remember(episode) { mutableStateOf<List<Int>>(emptyList()) }
-    var hdHeight by remember(episode) { mutableStateOf<Int?>(null) }
-    var returnToStream by remember(episode) { mutableStateOf<Source?>(null) }
+    var downloadLookupFailed by remember(episode) { mutableStateOf(false) }
+    var hlsQualities by remember(episode) { mutableStateOf<List<VideoQuality>>(emptyList()) }
+    var activeQuality by remember(episode) { mutableStateOf<VideoQuality?>(null) }
+    var request by remember(episode) { mutableStateOf<Pair<VideoQuality, Int>?>(null) }
     var ready by remember(episode) { mutableStateOf(false) }
-    var preparing by remember(episode) { mutableStateOf(false) }
+    var unavailable by remember(episode) { mutableStateOf(false) }
+    var qualityProblem by remember(episode) { mutableStateOf<String?>(null) }
+    var playbackEvent by remember { mutableIntStateOf(0) }
     var running by remember { mutableStateOf(false) }
     var playRequested by remember(episode) { mutableStateOf(false) }
     var ended by remember(episode) { mutableStateOf(false) }
-    var quality by remember(episode) { mutableStateOf("") }
     var tracks by remember(episode) { mutableStateOf<List<TextTrack>>(emptyList()) }
     var captionName by remember { mutableStateOf<String?>(null) }
     var captionPreference by remember { mutableStateOf(activity.subtitlePreference) }
+    var selectedCaptions by remember(episode) { mutableStateOf<List<TextTrack>>(emptyList()) }
     var elapsedMs by remember(episode) { mutableLongStateOf(0L) }
     var durationMs by remember(episode) { mutableLongStateOf(0L) }
     var scrubMs by remember(episode) { mutableStateOf<Long?>(null) }
     var dialog by remember { mutableStateOf<String?>(null) }
-    var checkingQualities by remember(episode) { mutableStateOf(false) }
     var controls by remember(episode) { mutableStateOf(true) }
     var controlsHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
@@ -228,7 +187,7 @@ internal fun MediaPlayerScreen(
         val durationMs = player.duration
         if (time !in 1_000L..durationMs || time / 1000 == lastSaved) return
         lastSaved = time / 1000
-        val report = source == Source.HLS || source == Source.HD
+        val report = activeQuality?.download == null
         activity.lifecycleScope.launch {
             activity.media.recordProgress(title.id, streamEpisode, time, durationMs, accountRevision, report)
         }
@@ -251,68 +210,47 @@ internal fun MediaPlayerScreen(
         }
     }
 
-    fun nextAfterFailure() {
-        rememberPlayback()
-        if (source == Source.DOWNLOAD) candidate = null
-        preparing = false
-        ready = false
-        source = when (source) {
-            Source.HLS, Source.DOWNLOAD -> Source.FIND_DOWNLOAD
-            else -> Source.UNAVAILABLE
+    fun selectStream(choice: VideoQuality) {
+        val override = choice.streamTrack ?: return
+        val selected = player.currentTracks.groups.any { group ->
+            group.mediaTrackGroup == override.mediaTrackGroup && group.isTrackSelected(override.trackIndices.single())
         }
+        // Some codecs keep the previous output buffer size across an in-place rendition change.
+        if (!selected) player.stop()
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setMaxVideoSize(Int.MAX_VALUE, choice.resolution ?: Int.MAX_VALUE).setOverrideForType(override).build()
+        if (!selected) player.prepare()
     }
 
-    suspend fun findDownload(): DownloadVideo? = downloadLookup.withLock {
-        candidate?.let { return@withLock it }
-
-        suspend fun rankedDownloads(): List<DownloadVideo> {
-            while (true) {
-                var rejected = false
-                val releases = activity.media.alternatives(title, episode)
-                val available = coroutineScope {
-                    releases.chunked(4).flatMap { batch ->
-                        batch.map { release ->
-                            async {
-                                try {
-                                    seekableDownloadSize(release.url)?.let { release to it }
-                                } catch (_: ExpiredMediaLink) {
-                                    rejected = true
-                                    null
-                                }
-                            }
-                        }.awaitAll().filterNotNull()
-                    }
-                }
-                if (available.isNotEmpty() || !rejected) return available.sortedByDescending { it.second }.map { it.first }
-                if (renewDownloads) throw ExpiredMediaLink()
-                renewDownloads = true
-                activity.media.clearPlaybackReads()
+    fun preferredCaptions(): List<TextTrack> {
+        if (captionPreference == BILINGUAL_SUBTITLES) {
+            return tracks.bilingualTracks().ifEmpty {
+                listOfNotNull(tracks.firstOrNull { it.preference == "fa" } ?: tracks.firstOrNull { it.preference == "en" })
             }
         }
+        val track = tracks.firstOrNull { it.preference == captionPreference && it.name == captionName }
+            ?: tracks.firstOrNull { it.preference == captionPreference }
+        return listOfNotNull(track)
+    }
 
-        val options = downloadOptions ?: tryNama { rankedDownloads() }.getOrNull()?.also { downloadOptions = it }.orEmpty()
-        options.getOrNull(nextDownload)?.also {
-            nextDownload++
-            candidate = it
+    fun selectCaptions() {
+        val next = preferredCaptions()
+        if (next.map(TextTrack::override) == selectedCaptions.map(TextTrack::override)) return
+        if (next.firstOrNull()?.override != selectedCaptions.firstOrNull()?.override) primaryCues = emptyList()
+        if (next.getOrNull(1)?.override != selectedCaptions.getOrNull(1)?.override) secondaryCues = emptyList()
+        selectedCaptions = next
+        captionSelector.selectCaptions(next)
+    }
+
+    suspend fun downloads(refresh: Boolean = false): List<DownloadVideo> = downloadLookup.withLock {
+        if (refresh) {
+            activity.media.clearPlaybackReads()
+            downloadOptions = null
         }
-    }
-
-    fun selectCaption(track: TextTrack?) {
-        val params = player.trackSelectionParameters.buildUpon()
-            .clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, track == null)
-        if (track != null) params.setOverrideForType(TrackSelectionOverride(track.group.mediaTrackGroup, track.index))
-        val updated = params.build()
-        if (updated != player.trackSelectionParameters) player.trackSelectionParameters = updated
-    }
-
-    fun preferredCaption() = tracks.firstOrNull { it.preference == captionPreference && it.name == captionName }
-        ?: tracks.firstOrNull { it.preference == captionPreference }
-
-    fun playTrack(track: TrackSelectionOverride) {
-        ready = true
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setOverrideForType(track).build()
-        if (player.duration > 0 && position >= player.duration) player.seekTo(0)
-        if (activity.foreground && playAfterSwitch) player.play()
+        downloadOptions?.let { return@withLock it }
+        val options = tryNama { activity.media.alternatives(title, episode) }
+        downloadLookupFailed = options.isFailure
+        options.getOrNull()?.also { downloadOptions = it }.orEmpty()
     }
 
     val saveLatestProgress by rememberUpdatedState(::saveProgress)
@@ -324,127 +262,244 @@ internal fun MediaPlayerScreen(
     }
     DisposableEffect(player, episode) {
         val listener = object : Player.Listener {
+            override fun onCues(cueGroup: CueGroup) { primaryCues = cueGroup.cues }
+
             override fun onEvents(playerInstance: Player, events: Player.Events) {
-                if (!preparing) return
-                if (events.contains(Player.EVENT_PLAYER_ERROR)) {
-                    val http = generateSequence<Throwable>(player.playerError) { it.cause }
-                        .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
-                    val expired = http != null && isExpiredMediaStatus(http.responseCode)
-                    if (expired && renewedSource == null && (source == Source.HLS || source == Source.HD)) {
-                        rememberPlayback()
-                        renewedSource = source
-                        preparing = false
-                        ready = false
-                        source = Source.RENEW_STREAM
-                        return
-                    }
-                    if (expired && source == Source.DOWNLOAD && !renewDownloads) {
-                        renewDownloads = true
-                        activity.media.clearPlaybackReads()
-                        downloadOptions = null
-                        nextDownload = 0
-                    }
-                    nextAfterFailure()
-                    return
-                }
+                playbackEvent++
                 running = player.isPlaying
                 ended = player.playbackState == Player.STATE_ENDED
                 playRequested = player.playWhenReady && !ended
-                val size = player.videoSize
-                if (size.height > 0) {
-                    quality = if (isUhd(size.width, size.height)) "4K · ${size.width} × ${size.height}" else "${size.height}p"
-                }
                 if (events.contains(Player.EVENT_TRACKS_CHANGED)) {
                     tracks = player.currentTracks.textTracks()
-                    selectCaption(preferredCaption())
-                    if (source == Source.HLS || source == Source.HD) {
-                        player.currentTracks.videoQualities().takeIf { it.isNotEmpty() }?.let { hlsQualities = it }
-                    }
+                    selectCaptions()
                 }
-                if (ready || player.playbackState != Player.STATE_READY) return
-                if (source == Source.DOWNLOAD && !player.isCurrentMediaItemSeekable) {
-                    nextAfterFailure()
-                    return
-                }
-                val requested = player.currentTracks.videoOverride(source, hdHeight)
-                if (requested == null) {
-                    retainedHls = source == Source.HLS && hlsQualities.any { it < 2160 }
-                    nextAfterFailure()
-                    return
-                }
-                playTrack(requested)
             }
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
 
-    LaunchedEffect(source, episode) {
-        preparing = false
+    var preparedUrl by remember(episode) { mutableStateOf<String?>(null) }
+    LaunchedEffect(episode, request) {
+        val previous = activeQuality
         ready = false
-        val keepHls = retainedHls && (source == Source.FIND_DOWNLOAD || source == Source.HD) &&
-            player.playbackState == Player.STATE_READY && player.playerError == null
-        if (source != Source.FIND_DOWNLOAD) retainedHls = false
-        if (keepHls) player.pause() else {
+        unavailable = false
+        qualityProblem = null
+        controls = true
+        player.pause()
+        val failedDownloads = mutableSetOf<String>()
+        val failedVariants = mutableSetOf<VideoQuality>()
+        var renewedStream = false
+        var renewedDownloads = false
+        var streamUnavailable = false
+        var attemptProblem: String? = null
+
+        fun expiredLink(): Boolean = generateSequence<Throwable>(player.playerError) { it.cause }
+            .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().any { isExpiredMediaStatus(it.responseCode) }
+
+        fun missingVideo(): Format? {
+            val groups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+            return groups.firstOrNull()?.takeIf { groups.none { it.isSelected } }?.getTrackFormat(0)
+        }
+
+        fun nextDecoder(): DecoderRoute? {
+            val error = player.playerError
+            val format = if (error == null) missingVideo() else {
+                if (!isDecoderError(error.errorCode)) return null
+                error.rendererFormat
+            } ?: return null
+            if (format.cryptoType != C.CRYPTO_TYPE_NONE) return null
+            if (BuildConfig.DEBUG) android.util.Log.i("BanamaDecoder",
+                "Retry check: ${error?.errorCodeName ?: "unselected track"} ${format.sampleMimeType} ${format.codecs}")
+            return renderers.route.retry(format.sampleMimeType, format.codecs)
+        }
+
+        suspend fun prepareOnce(url: String, captions: List<Caption>, stream: Boolean, route: DecoderRoute): Boolean {
+            if (preparedUrl == url && renderers.route == route && player.playerError == null &&
+                player.playbackState in setOf(Player.STATE_READY, Player.STATE_ENDED)) return true
+            preparedUrl = null
             player.stop()
             player.clearMediaItems()
-            quality = ""
+            renderers.route = route
             tracks = emptyList()
+            primaryCues = emptyList()
+            secondaryCues = emptyList()
+            selectCaptions()
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverrides()
+                .setMaxVideoSize(Int.MAX_VALUE, if (stream) activity.preferredResolution else Int.MAX_VALUE)
+                .setForceHighestSupportedBitrate(stream).build()
+            val item = MediaItem.Builder().setUri(url)
+                .setSubtitleConfigurations(captions.distinctBy { subtitlePreferenceKey(it.language, "") }.map(Caption::subtitle))
+            if (stream) item.setMimeType(MimeTypes.APPLICATION_M3U8)
+            player.setMediaItem(item.build(), position)
+            player.prepare()
+            val available = withTimeoutOrNull(20_000) {
+                snapshotFlow {
+                    playbackEvent.let {
+                        player.playerError != null || player.playbackState in setOf(Player.STATE_READY, Player.STATE_ENDED)
+                    }
+                }.first { it }
+                player.playerError == null
+            } == true
+            if (available && missingVideo() == null) {
+                preparedUrl = url
+                return true
+            }
+            return false
         }
-        running = false
-        playRequested = false
-        ended = false
-        controls = true
-        when (source) {
-            Source.FIND_DOWNLOAD -> {
-                val available = findDownload()
-                val previous = returnToStream
-                source = when {
-                    available != null -> Source.DOWNLOAD
-                    previous != null -> previous.also { returnToStream = null }
-                    hlsQualities.none { it < 2160 } -> Source.UNAVAILABLE
-                    else -> Source.HD
-                }
-            }
-            Source.RENEW_STREAM -> {
-                val fresh = tryNama { activity.media.renewEpisode(title, episode.key) }.getOrNull()
-                if (fresh != null) {
-                    streamEpisode = fresh
-                    source = renewedSource ?: Source.HLS
-                } else source = if (renewedSource == Source.HLS) Source.FIND_DOWNLOAD else Source.UNAVAILABLE
-            }
-            Source.HLS, Source.HD, Source.DOWNLOAD -> {
-                val hls = source != Source.DOWNLOAD
-                val url = if (hls) streamEpisode.hls else candidate?.url
-                if (url == null) {
-                    source = Source.UNAVAILABLE
-                    return@LaunchedEffect
-                }
-                val hdTrack = if (keepHls) player.currentTracks.videoOverride(Source.HD, hdHeight) else null
-                if (hdTrack != null) {
-                    preparing = true
-                    playTrack(hdTrack)
-                } else {
-                    val captions = if (hls) streamEpisode.captions else candidate?.captions.orEmpty()
-                    val item = MediaItem.Builder().setUri(url)
-                        .setSubtitleConfigurations(captions.distinctBy { it.language }.map(Caption::subtitle))
-                    if (hls) item.setMimeType(MimeTypes.APPLICATION_M3U8)
-                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                        .clearOverrides().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-                    player.playWhenReady = false
-                    preparing = true
-                    player.setMediaItem(item.build(), position)
-                    player.prepare()
-                }
-                delay(20_000)
-                if (preparing && (!ready || quality.isBlank() || (source != Source.HD && !quality.startsWith("4K")))) {
-                    nextAfterFailure()
-                }
-            }
-            Source.UNAVAILABLE -> Unit
+
+        suspend fun prepare(url: String, captions: List<Caption>, stream: Boolean, initial: DecoderRoute): Boolean {
+            var route = initial
+            while (!prepareOnce(url, captions, stream, route)) route = nextDecoder() ?: return false
+            return true
         }
+
+        suspend fun renewStream(): Boolean {
+            if (renewedStream) return false
+            renewedStream = true
+            val fresh = tryNama { activity.media.renewEpisode(title, episode.key) }.getOrNull() ?: return false
+            streamEpisode = fresh
+            return true
+        }
+
+        suspend fun openStream(route: DecoderRoute = DecoderRoute()): List<VideoQuality> {
+            if (streamUnavailable) return emptyList()
+            while (true) {
+                val url = streamEpisode.hls ?: break
+                if (prepare(url, streamEpisode.captions, stream = true, route)) {
+                    hlsQualities = player.videoSize.let { player.currentTracks.videoQualities(it.width, it.height) }
+                    return hlsQualities.filter { variant -> failedVariants.none { variant.sameVariant(it) } }
+                }
+                if (!expiredLink() || !renewStream()) break
+            }
+            streamUnavailable = true
+            hlsQualities = emptyList()
+            return emptyList()
+        }
+
+        suspend fun freshDownload(release: DownloadVideo): DownloadVideo? {
+            if (renewedDownloads) return null
+            renewedDownloads = true
+            return downloads(refresh = true).firstOrNull {
+                (release.id != 0 && it.id == release.id) || httpsUri(it.url)?.path == httpsUri(release.url)?.path
+            }
+        }
+
+        suspend fun openDownload(chosen: DownloadVideo, route: DecoderRoute = DecoderRoute()): VideoQuality? {
+            attemptProblem = null
+            var release = chosen
+            while (failedDownloads.add(release.url)) {
+                val range = try {
+                    if (preparedUrl == release.url && player.playerError == null) DownloadRange.SEEKABLE
+                    else downloadRange(release.url)
+                } catch (_: ExpiredMediaLink) {
+                    attemptProblem = "The download link expired or the server denied access."
+                    release = freshDownload(release) ?: return null
+                    continue
+                }
+                if (range != DownloadRange.SEEKABLE) {
+                    attemptProblem = if (range == DownloadRange.INVALID) "The server didn’t return valid byte ranges for seeking."
+                        else "The player couldn’t read the release from the server."
+                    return null
+                }
+                if (prepare(release.url, release.captions, stream = false, route)) {
+                    if (!player.isCurrentMediaItemSeekable) {
+                        attemptProblem = "The file opened, but the player couldn’t seek through it."
+                        return null
+                    }
+                    val video = player.videoSize.let { player.currentTracks.videoQualities(it.width, it.height) }
+                        .firstOrNull()
+                    if (video == null) {
+                        attemptProblem = "This device couldn’t decode this release."
+                        return null
+                    }
+                    return release.videoQuality().copy(resolution = release.resolution ?: video.resolution,
+                        encoder = release.encoder.ifBlank { video.encoder })
+                }
+                if (!expiredLink()) {
+                    attemptProblem = if (missingVideo() != null) "This device couldn’t decode this release."
+                        else releasePlaybackProblem(player.playerError?.errorCode)
+                    return null
+                }
+                attemptProblem = "The download link expired or the server denied access."
+                release = freshDownload(release) ?: return null
+            }
+            return null
+        }
+
+        suspend fun openChoice(choice: VideoQuality): VideoQuality? {
+            val download = choice.download
+            return if (download != null) openDownload(download)
+            else openStream().firstOrNull { it.sameVariant(choice) }
+        }
+
+        suspend fun bestQuality(): VideoQuality? {
+            val target = activity.preferredResolution
+            val streams = openStream()
+            streams.firstOrNull { it.resolution == target }?.let { return it }
+            val releases = downloads()
+            for (resolution in rankResolutions(streams.map { it.resolution } + releases.map { it.resolution }, target)) {
+                val stream = streams.firstOrNull { it.resolution == resolution }
+                if (stream != null) {
+                    openChoice(stream)?.let { return it }
+                }
+                for (release in releases.filter { it.resolution == resolution }) {
+                    openDownload(release)?.let { return it }
+                }
+            }
+            return null
+        }
+
+        val requested = request?.first
+        var choice = requested?.let { openChoice(it) }
+        var usingRequested = requested != null && choice != null
+        if (requested != null && choice == null) {
+            qualityProblem = attemptProblem ?: "The requested quality couldn’t be opened."
+        }
+        choice = choice ?: previous?.takeIf { requested != null }?.let { openChoice(it) } ?: bestQuality()
+
+        while (choice != null) {
+            activeQuality = choice
+            selectStream(choice)
+            if (player.duration in 1..position) player.seekTo(0)
+            ready = true
+            if (activity.foreground && playAfterSwitch) player.play()
+            if (qualityProblem != null && dialog == null) dialog = "quality_unavailable"
+            val error = snapshotFlow { playbackEvent.let { player.playerError } }.filterNotNull().first()
+
+            rememberPlayback()
+            ready = false
+            val failed = activeQuality ?: choice
+            val release = failed.download
+            attemptProblem = if (expiredLink()) "The download link expired or the server denied access." else null
+            val retry = nextDecoder()
+            choice = if (release != null) {
+                when {
+                    expiredLink() -> freshDownload(release)?.let { openDownload(it, renderers.route) }
+                    retry != null -> {
+                        failedDownloads.remove(release.url)
+                        openDownload(release, retry)
+                    }
+                    else -> null
+                }
+            } else if (retry != null) {
+                openStream(retry).firstOrNull { it.sameVariant(failed) }
+            } else if (expiredLink() && renewStream()) {
+                openChoice(failed)
+            } else null
+            if (choice == null && release == null) failedVariants.add(failed)
+            if (choice == null && usingRequested) {
+                qualityProblem = attemptProblem ?: releasePlaybackProblem(error.errorCode)
+                usingRequested = false
+            }
+            choice = choice ?: bestQuality()
+        }
+
+        player.stop()
+        activeQuality = null
+        unavailable = true
     }
-    LaunchedEffect(episode, source) {
+    LaunchedEffect(episode, activeQuality) {
         while (true) {
             elapsedMs = player.currentPosition.coerceAtLeast(0)
             durationMs = player.duration.coerceAtLeast(0)
@@ -453,12 +508,8 @@ internal fun MediaPlayerScreen(
     }
     LaunchedEffect(episode, dialog) {
         if (dialog == "quality") {
-            checkingQualities = true
-            try {
-                findDownload()
-            } finally {
-                checkingQualities = false
-            }
+            downloadLookupFailed = false
+            downloads()
         }
     }
     LaunchedEffect(activity.foreground) {
@@ -479,10 +530,10 @@ internal fun MediaPlayerScreen(
     }
 
     val canSeek = ready && player.isCurrentMediaItemSeekable && durationMs > 0
-    val chapterEnd = if (canSeek && !ended && source != Source.DOWNLOAD) {
+    val chapterEnd = if (canSeek && !ended && activeQuality?.download == null) {
         streamEpisode.markers.intro?.takeIf { elapsedMs in it && it.last < durationMs }?.let { it.last + 1 }
     } else null
-    val credits = canSeek && !ended && source != Source.DOWNLOAD &&
+    val credits = canSeek && !ended && activeQuality?.download == null &&
         streamEpisode.markers.creditsMs?.let { elapsedMs in it..<durationMs } == true
     val chapterLabel = when {
         chapterEnd != null -> "Skip intro"
@@ -490,7 +541,6 @@ internal fun MediaPlayerScreen(
         credits -> "Skip credits"
         else -> null
     }
-    val chapterId = if (credits && nextEpisode != null) "player/next" else "player/chapter"
     LaunchedEffect(running, controls, dialog, interaction, scrubMs) {
         if (running && controls && dialog == null && scrubMs == null) {
             delay(6_000)
@@ -500,8 +550,8 @@ internal fun MediaPlayerScreen(
     LaunchedEffect(controls, ready, dialog, episode, chapterLabel, ended) {
         if (!ready || dialog != null) return@LaunchedEffect
         val focus = when {
-            !controls -> chapterId.takeIf { chapterLabel != null }
-            ended -> if (nextEpisode != null) "player/next" else "player/play"
+            !controls -> "player/chapter".takeIf { chapterLabel != null }
+            ended -> if (nextEpisode != null) "player/episodes" else "player/play"
             selected == "player/chapter" && chapterLabel == null -> "player/timeline"
             else -> selected
         }
@@ -539,24 +589,16 @@ internal fun MediaPlayerScreen(
     }
 
     fun switchQuality(choice: VideoQuality) {
-        val height = choice.height.takeIf { choice.source == Source.HD }
-        if (source == choice.source) {
-            if (choice.source == Source.HD && height != hdHeight) {
-                player.currentTracks.videoOverride(Source.HD, height)?.let {
-                    hdHeight = height
-                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                        .setOverrideForType(it).build()
-                }
-            }
-        } else {
+        choice.resolution?.takeIf { it in savedResolutions }?.let { activity.preferredResolution = it }
+        if (choice != activeQuality) {
             saveProgress()
             rememberPlayback()
-            if (choice.source == Source.DOWNLOAD) returnToStream = source
-            else {
-                returnToStream = null
-                hdHeight = height
+            if (activeQuality?.streamTrack != null && choice.streamTrack != null) {
+                activeQuality = choice
+                selectStream(choice)
+            } else {
+                request = choice to ((request?.second ?: 0) + 1)
             }
-            source = choice.source
         }
         dialog = null
     }
@@ -624,8 +666,6 @@ internal fun MediaPlayerScreen(
             else -> false
         }
     }) {
-        val visibleVideo = ready && quality.isNotBlank() &&
-            (source == Source.HD || quality.startsWith("4K"))
         AndroidView(
             factory = { context ->
                 PlayerView(context).also {
@@ -634,20 +674,28 @@ internal fun MediaPlayerScreen(
                     it.isFocusableInTouchMode = false
                     it.descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
                     it.player = player
-                    it.subtitleView?.apply {
-                        setApplyEmbeddedStyles(false)
-                        setStyle(CaptionStyleCompat(
-                            android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
-                            CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK,
-                            Typeface.create("sans-serif", Typeface.NORMAL),
-                        ))
+                    it.subtitleView?.let { original ->
+                        original.visibility = View.GONE
+                        val captions = SubtitleView(context).apply {
+                            id = R.id.banama_subtitle_overlay
+                            setStyle(CaptionStyleCompat(
+                                android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+                                CaptionStyleCompat.EDGE_TYPE_OUTLINE, android.graphics.Color.BLACK,
+                                Typeface.create("sans-serif", Typeface.NORMAL),
+                            ))
+                        }
+                        (original.parent as ViewGroup).addView(captions, original.layoutParams)
                     }
                 }
             },
             modifier = Modifier.fillMaxSize(),
             update = { view ->
+                view.keepScreenOn = activity.foreground && ready && running
                 val overlayHeight = if (controls && ready) controlsHeightPx else 0
-                view.subtitleView?.apply {
+                view.findViewById<SubtitleView>(R.id.banama_subtitle_overlay)?.apply {
+                    val main = primaryCues.takeIf { selectedCaptions.isNotEmpty() }.orEmpty()
+                    val extra = secondaryCues.takeIf { selectedCaptions.size == 2 }.orEmpty()
+                    setCues(displayCaptions(main, extra, persianTypeface, selectedCaptions.firstOrNull()?.preference == "fa"))
                     doOnLayout {
                         val (inset, extra) = subtitleBottomInsets(view.height, height, overlayHeight, subtitleGapPx)
                         setPadding(0, 0, 0, inset)
@@ -656,11 +704,14 @@ internal fun MediaPlayerScreen(
                     }
                 }
             },
-            onRelease = { it.player = null },
+            onRelease = {
+                it.keepScreenOn = false
+                it.player = null
+            },
         )
-        if (!visibleVideo) Box(Modifier.fillMaxSize().background(Color.Black))
+        if (!ready) Box(Modifier.fillMaxSize().background(Color.Black))
         if (!controls && chapterLabel == null) Box(Modifier.fillMaxSize().focusRequester(hiddenFocus).focusable())
-        if (!visibleVideo && source != Source.UNAVAILABLE) {
+        if (!ready && !unavailable) {
             Text("Preparing playback…", Modifier.align(Alignment.Center), fontSize = 21.sp)
         }
         if (controls && ready) {
@@ -671,32 +722,32 @@ internal fun MediaPlayerScreen(
                 )).padding(start = 40.dp, end = 40.dp, top = 28.dp, bottom = 22.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val heading = listOfNotNull(title.name, if (title.series) "S${episode.season} · E${episode.number}" else null)
-                Text(heading.joinToString("  "), fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Box(Modifier.fillMaxWidth().height(56.dp)) {
-                    if (nextEpisode != null && !(credits && chapterLabel == "Next episode")) {
-                        MediaIconButton(
-                            "Next episode", R.drawable.media_next_episode, "player/next", move, { selected = it },
-                            modifier = Modifier.align(Alignment.CenterStart).size(48.dp),
-                        ) { switchEpisode(nextEpisode) }
+                Row(
+                    Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(title.name, Modifier.weight(1f, fill = false).alignByBaseline(), fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (title.series) {
+                            Text("S${episode.season} · E${episode.number}", Modifier.alignByBaseline(),
+                                color = secondary, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        }
                     }
                     MediaIconButton(
                         if (playRequested) "Pause" else if (ended) "Replay" else "Play",
                         if (playRequested) R.drawable.media_pause else R.drawable.media_play,
                         "player/play", move, { selected = it },
-                        modifier = Modifier.align(Alignment.Center).size(56.dp), shape = CircleShape,
+                        modifier = Modifier.size(56.dp), shape = CircleShape,
                     ) { setPlaying(!player.playWhenReady || ended) }
-                    Row(Modifier.align(Alignment.CenterEnd), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                         MediaIconButton("Subtitles", R.drawable.media_subtitles, "player/subtitles", move, { selected = it }) {
                             dialog = "subtitles"
                         }
                         if (title.series) MediaIconButton("Episodes", R.drawable.media_episodes, "player/episodes", move,
                             { selected = it }) { dialog = "episodes" }
-                        Action(quality.ifBlank { "Quality" }, {
-                            checkingQualities = true
-                            dialog = "quality"
-                        }, "player/quality", move, { selected = it },
+                        val resolution = activeQuality?.resolution
+                        Action(resolution?.resolutionLabel ?: "Quality", { dialog = "quality" }, "player/quality", move, { selected = it },
                             modifier = Modifier.semantics { contentDescription = "Quality" }, icon = R.drawable.media_quality)
                     }
                 }
@@ -722,7 +773,7 @@ internal fun MediaPlayerScreen(
                     else -> seekTo(durationMs)
                 }
             },
-            chapterId, move, { selected = it },
+            "player/chapter", move, { selected = it },
             Modifier.align(Alignment.BottomEnd).padding(
                 end = 40.dp, bottom = if (controls) with(density) { controlsHeightPx.toDp() } + 12.dp else 26.dp,
             ),
@@ -730,40 +781,56 @@ internal fun MediaPlayerScreen(
         )
     }
     when {
-        source == Source.UNAVAILABLE -> MediaDialog(
-            "Can’t play this title", "30nama didn’t provide a compatible source.",
+        unavailable -> MediaDialog(
+            "Can’t play this title", qualityProblem ?: "30nama didn’t provide a compatible source.",
             listOf("Back"), close = onClose,
         ) { onClose() }
-        dialog == "subtitles" -> MediaDialog("Subtitles", "No subtitles are available for this source.".takeIf { tracks.isEmpty() },
-            listOf("Off") + tracks.map(TextTrack::name),
-            initial = tracks.indexOf(preferredCaption()) + 1, close = { dialog = null }) {
-            val track = tracks.getOrNull(it - 1)
-            captionName = track?.name
-            captionPreference = track?.preference
-            activity.subtitlePreference = captionPreference
-            selectCaption(track)
-            dialog = null
-            interaction++
+        dialog == "subtitles" -> {
+            val bilingual = tracks.bilingualTracks().isNotEmpty()
+            val bilingualIndex = if (bilingual) 1 else -1
+            val trackOffset = if (bilingual) 2 else 1
+            val selectIndex = if (bilingual && captionPreference == BILINGUAL_SUBTITLES) 1
+                else tracks.indexOf(preferredCaptions().firstOrNull()).let { if (it >= 0) it + trackOffset else 0 }
+            MediaDialog("Subtitles", "No subtitles are available for this source.".takeIf { tracks.isEmpty() },
+                listOf("Off") + listOfNotNull("Persian + English".takeIf { bilingual }) + tracks.map(TextTrack::name),
+                initial = selectIndex, close = { dialog = null }) { index ->
+                val track = tracks.getOrNull(index - trackOffset)
+                captionName = track?.name
+                captionPreference = if (index == bilingualIndex) BILINGUAL_SUBTITLES else track?.preference
+                activity.subtitlePreference = captionPreference
+                selectCaptions()
+                dialog = null
+                interaction++
+            }
         }
         dialog == "episodes" -> EpisodePicker(
             catalog.episodes, episode, activity.media.lastPlayed(title.id), { dialog = null }, ::switchEpisode,
         )
-        dialog == "quality" && checkingQualities -> MediaDialog(
-            "Quality", "Checking available qualities…", listOf("Back"), close = { dialog = null },
-        ) { dialog = null }
+        dialog == "quality_unavailable" -> MediaDialog(
+            "Release unavailable", "$qualityProblem Playing another quality.", listOf("Close"), close = {
+                qualityProblem = null
+                dialog = null
+            },
+        ) {
+            qualityProblem = null
+            dialog = null
+        }
         dialog == "quality" -> {
-            val choices = buildList {
-                if (2160 in hlsQualities) add(VideoQuality(Source.HLS, 2160))
-                if (candidate != null) add(VideoQuality(Source.DOWNLOAD, 2160))
-                hlsQualities.filter { it < 2160 }.forEach { add(VideoQuality(Source.HD, it)) }
+            val releases = downloadOptions
+            val current = activeQuality
+            val choices = hlsQualities + releases.orEmpty().map { release ->
+                current?.takeIf { it.download == release } ?: release.videoQuality()
             }
-            val currentHeight = if (source == Source.HD) hdHeight ?: player.videoSize.height else 2160
-            MediaDialog(
-                "Quality", "Playback can continue at its current quality.".takeIf { choices.isEmpty() },
-                choices.map(VideoQuality::label).ifEmpty { listOf("Back") },
-                initial = choices.indexOf(VideoQuality(source, currentHeight)).coerceAtLeast(0),
-                close = { dialog = null },
-            ) { index -> choices.getOrNull(index)?.let(::switchQuality) ?: run { dialog = null } }
+            if ((releases != null || downloadLookupFailed) && choices.isNotEmpty()) {
+                QualityPicker(choices, current, downloadLookupFailed, { dialog = null }, ::switchQuality)
+            } else {
+                val message = when {
+                    downloadLookupFailed -> "File releases could not be loaded."
+                    releases == null -> "Checking available qualities…"
+                    else -> "No alternate qualities are available."
+                }
+                MediaDialog("Playback quality", message, listOf("Back"), close = { dialog = null }) { dialog = null }
+            }
         }
     }
 }

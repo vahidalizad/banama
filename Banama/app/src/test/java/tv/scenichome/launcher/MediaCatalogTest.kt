@@ -8,6 +8,22 @@ import org.junit.Test
 
 class MediaCatalogTest {
     @Test
+    fun profileUsesTheServerTierAndDaysAndHandlesMissingAccountDetails() {
+        val account = JSONObject("""
+            {"user_id":10,"user_name":"June Park","user_type":"golden",
+            "user_expire":{"days":"12"},"user_allowed_to_stream":true}
+        """).readAccount()
+        assertEquals("June Park", account.username)
+        assertEquals("JP", account.initials)
+        assertEquals("Gold", account.tier)
+        assertEquals(12, account.days)
+        assertTrue(account.stream)
+        assertEquals(0, JSONObject("""{"user_expire":{"days":-2}}""").readAccount().days)
+        assertEquals(null, JSONObject().readAccount().days)
+        assertEquals("", JSONObject().readAccount().initials)
+    }
+
+    @Test
     fun homeOnlyReadsWaitUntilHomeReturnsAndRetriesIgnoreDeadlines() {
         val deadlines = mutableMapOf("account" to 100L, "home" to 110L, "watch" to 120L)
         val home = RefreshSchedule(true, null, true, deadlines)
@@ -88,11 +104,31 @@ class MediaCatalogTest {
         val releases = JSONObject("""
             {"download":{"Season 2":[
                 {"season_int":2,"resolution":"3840x1600","link":[{"episode":3,"dl":"https://media.example/uhd.mkv"}]},
-                {"season_int":2,"quality":"1080p","link":[{"episode":3,"dl":"https://media.example/hd.mkv"}]},
+                {"season_int":2,"quality":"1080p","encoder":"PSA","source":"WEB-DL","link":[
+                    {"episode":3,"dl":"https://media.example/hd.mp4?token=test","english_subtitle":"https://media.example/en.srt"}]},
                 {"season_int":2,"quality":"2160p","link":[{"episode":4,"dl":"http://media.example/insecure.mkv"}]}
             ]}}
         """).downloads()
-        assertEquals(listOf(DownloadVideo(2, 3, "https://media.example/uhd.mkv", emptyList())), releases)
+        assertEquals(listOf(
+            DownloadVideo(2, 3, "https://media.example/uhd.mkv", emptyList(), 2160, container = "mkv"),
+            DownloadVideo(2, 3, "https://media.example/hd.mp4?token=test", listOf(Caption("en", "https://media.example/en.srt")),
+                1080, "PSA", "mp4", "WEB-DL"),
+        ), releases)
+    }
+
+    @Test
+    fun retainsBothCroppedUhdEncodesAndTheirReleaseLabels() {
+        val releases = JSONObject("""
+            {"download":[
+                {"quality":"x265 BluRay UHD 2160p","resolution":"3840x1608","encoder":"PaHe","size":"8.76 GB",
+                    "dl":"https://media.example/pahe.mkv"},
+                {"quality":"x265 BrRip 2160p","resolution":"3840x1608","encoder":"PSA","size":"4.68 GB",
+                    "dl":"https://media.example/psa.mkv"}
+            ]}
+        """).downloads()
+        assertEquals(listOf(2160, 2160), releases.map(DownloadVideo::resolution))
+        assertEquals(listOf("PaHe", "PSA"), releases.map(DownloadVideo::encoder))
+        assertEquals("8.76 GB", releases.first().size)
     }
 
     @Test
@@ -107,12 +143,12 @@ class MediaCatalogTest {
                 {"episode":"3","quality":"1080p","dl":"https://media.example/third.mkv"}
             ]}]}}
         """).downloads()
-        assertEquals(listOf(1, 2, 2), releases.map(DownloadVideo::episode))
+        assertEquals(listOf(1, 2, 2, 3), releases.map(DownloadVideo::episode))
         assertTrue(releases.all { it.season == 2 })
 
         val merged = catalog.includeDownloads(releases)
         assertEquals(first, merged.episodes.first())
-        assertEquals(listOf(1, 2), merged.episodes.map(MediaEpisode::number))
+        assertEquals(listOf(1, 2, 3), merged.episodes.map(MediaEpisode::number))
         assertEquals(null, merged.episodes.last().hls)
         assertEquals(28, merged.resumeFile)
     }
