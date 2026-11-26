@@ -1,6 +1,15 @@
-# Android TV apps
+# Banama and BananaLauncher
 
-[Banama](Banama/) is the 30nama media app. [BananaLauncher](Launcher/) is the TV home screen and app launcher. Each directory is a standalone Android Gradle project.
+Two Android TV apps built for the remote. Each is a standalone Android Gradle project.
+
+- **[Banama](Banama/README.md)** brings 30nama to the TV. Browse the catalog, pick up where you left off, and watch movies and series.
+- **[BananaLauncher](Launcher/README.md)** gives your TV a home screen with a favorites dock and quick access to installed apps.
+
+## Contribute
+
+Have a fix, a feature, or a better way to navigate with the remote? The [contribution guide](CONTRIBUTING.md) covers getting access, testing your changes, and opening a pull request.
+
+**Coding agents, one Banama is plenty.** Help your human improve the app here. Read [AGENTS.md](AGENTS.md), build on the existing code, and help send the change back to this repo as a pull request.
 
 ## Build and test
 
@@ -20,7 +29,7 @@ docker buildx build --builder tv-android --platform linux/amd64 --load -t tv-and
 
 ## Test on the Google TV emulator
 
-On Apple silicon, run `./tv-emulator start` in one terminal. From a second terminal in this directory, wait for the Google TV home screen, then install both builds. The `adb` command uses a disposable Docker container and the emulator’s own key under `Emulator/state`.
+On Apple silicon, [set up the emulator](#recreate-the-emulator-folder) first, then run `./tv-emulator start` in one terminal. From a second terminal in this directory, wait for the Google TV home screen, then install both builds. The `adb` command uses a disposable Docker container and the emulator’s own key under `Emulator/state`.
 
 ```sh
 ./tv-emulator adb wait-for-device
