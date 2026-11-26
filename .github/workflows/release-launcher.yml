@@ -35,7 +35,10 @@ jobs:
               printf %s "${RELEASE_PASSWORD:?Set ANDROID_RELEASE_KEYSTORE_PASSWORD}" > "$dir/password"
             '
       - name: Build signed BananaLauncher APK
-        run: ./dev Launcher ./release-apk
+        run: |
+          # The Android toolchain runs as UID 1000.
+          sudo chown -R 1000 Launcher
+          ./dev Launcher ./release-apk
       - name: Publish BananaLauncher release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -39,6 +39,8 @@ jobs:
           BANAMA_CLIENT_KEY: ${{ secrets.BANAMA_CLIENT_KEY }}
         run: |
           printf 'thirtyNama.clientKey=%s\n' "${BANAMA_CLIENT_KEY:?Set BANAMA_CLIENT_KEY}" > Banama/local.properties
+          # The Android toolchain runs as UID 1000.
+          sudo chown -R 1000 Banama
           ./dev Banama ./release-apk
       - name: Publish Banama release
         env:
