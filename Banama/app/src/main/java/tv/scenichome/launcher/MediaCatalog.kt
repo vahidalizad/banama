@@ -130,6 +130,18 @@ internal data class MediaEpisode(
     val markers: PlaybackMarkers = PlaybackMarkers(null, null),
 ) {
     val key get() = EpisodeNumber(season, number)
+
+    fun observerForm(titleId: Int, userId: Int, timeMs: Long, durationMs: Long): Map<String, String>? {
+        if (userId <= 0 || fileId <= 0 || progressToken.isBlank()) return null
+        // 30nama ignores positions between its 30-second checkpoints.
+        val checkpointSeconds = (timeMs / 30_000) * 30
+        if (checkpointSeconds == 0L) return null
+        return mapOf(
+            "post_id" to titleId.toString(), "file_id" to fileId.toString(),
+            "user_id" to userId.toString(), "time" to checkpointSeconds.toString(),
+            "duration" to (durationMs / 1000).toString(), "token" to progressToken,
+        )
+    }
 }
 
 internal data class PlaybackMarkers(val intro: LongRange?, val creditsMs: Long?)
@@ -273,6 +285,7 @@ internal class NamaApi(
             if (status !in 200..299) {
                 throw NamaFailure(browserChallenge = connection.getHeaderField("cf-mitigated") == "challenge")
             }
+            if (action == "observer") return@withContext decode(JSONObject())
             val result = connection.inputStream.use { JSONObject(it.readBounded(4 * 1024 * 1024).decodeToString()) }
             val emptyList = action == "user_list" && form["action"] == "list" && result.isEmptyLibraryResponse()
             if (action != "qrlogin_login" && !emptyList && (!result.optBoolean("success") || result.optBoolean("error"))) {

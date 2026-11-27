@@ -177,21 +177,31 @@ internal fun MediaPlayerScreen(
     var position by remember(episode) {
         mutableLongStateOf(activity.media.lastPlayed(title.id)?.takeIf { it.episode == episode.key }?.timeMs ?: 0L)
     }
-    var lastSaved by remember(episode) { mutableLongStateOf(-1L) }
+    var lastSaved by remember(episode) { mutableStateOf<Pair<Long, Boolean>?>(null) }
+    var saveOnPlay by remember(episode) { mutableStateOf(false) }
     var playAfterSwitch by remember(episode) { mutableStateOf(true) }
     val hiddenFocus = remember { FocusRequester() }
     val nextEpisode = remember(catalog, episode) { if (title.series) catalog.nextEpisode(episode) else null }
 
-    fun saveProgress() {
-        if (!ready) return
+    fun saveProgress(): Boolean {
+        if (!ready) return false
         val time = player.currentPosition
         val durationMs = player.duration
-        if (time !in 1_000L..durationMs || time / 1000 == lastSaved) return
-        lastSaved = time / 1000
-        val report = activeQuality?.download == null
+        if (time !in 1_000L..durationMs) return false
+        val directFile = activeQuality?.download != null
+        val checkpoint = time / 1000 to directFile
+        if (checkpoint == lastSaved) return true
+        lastSaved = checkpoint
+        val playedEpisode = streamEpisode
         activity.lifecycleScope.launch {
-            activity.media.recordProgress(title.id, streamEpisode, time, durationMs, accountRevision, report)
+            activity.media.recordProgress(title.id, playedEpisode, time, durationMs, accountRevision, directFile)
         }
+        return true
+    }
+
+    fun playWithProgress() {
+        player.play()
+        saveOnPlay = !player.isPlaying || !saveProgress()
     }
 
     BackHandler {
@@ -464,7 +474,7 @@ internal fun MediaPlayerScreen(
             selectStream(choice)
             if (player.duration in 1..position) player.seekTo(0)
             ready = true
-            if (activity.foreground && playAfterSwitch) player.play()
+            if (activity.foreground && playAfterSwitch) playWithProgress()
             if (qualityProblem != null && dialog == null) dialog = "quality_unavailable"
             val error = snapshotFlow { playbackEvent.let { player.playerError } }.filterNotNull().first()
 
@@ -504,6 +514,7 @@ internal fun MediaPlayerScreen(
         while (true) {
             elapsedMs = player.currentPosition.coerceAtLeast(0)
             durationMs = player.duration.coerceAtLeast(0)
+            if (saveOnPlay && player.isPlaying && saveProgress()) saveOnPlay = false
             delay(500)
         }
     }
@@ -574,7 +585,7 @@ internal fun MediaPlayerScreen(
     fun setPlaying(play: Boolean) {
         if (play) {
             if (ended) seekTo(0)
-            player.play()
+            playWithProgress()
         } else {
             saveProgress()
             player.pause()
