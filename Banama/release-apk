@@ -2,9 +2,10 @@
 set -eu
 cd "$(dirname "$0")"
 output=Banama.apk
+min_sdk=24
 case "$#:${1:-}" in
     0:) ;;
-    1:--bundled-hevc) output=Banama-bundled-hevc.apk; set -- -PbundledHevc=true ;;
+    1:--bundled-hevc) output=Banama-bundled-hevc.apk; min_sdk=26; set -- -PbundledHevc=true ;;
     *) echo "Usage: ./release-apk [--bundled-hevc]" >&2; exit 2 ;;
 esac
 ./gradlew --no-daemon :app:assembleRelease "$@"
@@ -18,19 +19,33 @@ case "$badging" in
     *) echo "Unexpected package in Banama APK." >&2; exit 1 ;;
 esac
 case "$badging" in
+    *"sdkVersion:'$min_sdk'"*) ;;
+    *) echo "Expected Android API $min_sdk as the minimum for $output." >&2; exit 1 ;;
+esac
+case "$badging" in
+    *"uses-feature: name='android.software.leanback'"*|*"uses-feature: name='android.hardware.touchscreen'"*)
+        echo "Banama must also run on TV boxes without Leanback or a touchscreen." >&2
+        exit 1 ;;
+esac
+case "$badging" in
     *"provides-component:'accessibility'"*|*"application-debuggable"*)
         echo "The shareable APK contains the developer Home redirect or is debuggable." >&2
         exit 1 ;;
 esac
 
-if [ "$output" = Banama-bundled-hevc.apk ]; then
-    for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+native_code=$(printf '%s\n' "$badging" | sed -n 's/^native-code: //p')
+for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+    case "$native_code" in
+        ''|*"'$abi'"*) ;;
+        *) echo "Missing $abi support in $output." >&2; exit 1 ;;
+    esac
+    if [ "$output" = Banama-bundled-hevc.apk ]; then
         unzip -Z1 "$apk" "lib/$abi/libmedia3ext.so" >/dev/null || {
             echo "Bundled decoder missing for $abi" >&2
             exit 1
         }
-    done
-fi
+    fi
+done
 
 mkdir -p artifacts
 temp=$(mktemp artifacts/.Banama.XXXXXX)

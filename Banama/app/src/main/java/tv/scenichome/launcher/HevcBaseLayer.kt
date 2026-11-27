@@ -25,6 +25,7 @@ internal data class DecoderRoute(
     val softwareVideo: String? = null,
     val softwareAudio: String? = null,
 ) {
+    @OptIn(UnstableApi::class)
     fun retry(mime: String?, codecs: String?): DecoderRoute? = when {
         mime == MimeTypes.VIDEO_DOLBY_VISION && !hevcBase && hasDolbyVisionHevcBase(codecs) -> copy(hevcBase = true)
         mime == MimeTypes.VIDEO_DOLBY_VISION -> null

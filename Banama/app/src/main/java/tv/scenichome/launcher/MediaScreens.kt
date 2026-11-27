@@ -100,7 +100,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.Year
 import java.util.Locale
 
 private val mediaShape = RoundedCornerShape(14.dp)
@@ -643,7 +642,7 @@ internal fun MediaSearchScreen(
                 closeFilter()
             }
             SearchControl.YEAR -> {
-                val years = remember { (Year.now().value downTo FIRST_RELEASE_YEAR).map { BrowseOption(it.toString(), it.toString()) } }
+                val years = remember { (currentReleaseYear() downTo FIRST_RELEASE_YEAR).map { BrowseOption(it.toString(), it.toString()) } }
                 MultiSelectFilters("Release years", years, state.years.map(Int::toString).toSet(),
                     columns = 6, close = ::closeFilter) { values ->
                     state.years = values.mapNotNull(String::toIntOrNull).toSet()
