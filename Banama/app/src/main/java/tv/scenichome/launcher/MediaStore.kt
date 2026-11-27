@@ -27,12 +27,26 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-private data class LocalProgress(
+internal data class LocalProgress(
     val position: WatchPosition,
     val furthest: EpisodeNumber,
     val serverAtSave: WatchPosition?,
     val watchedAt: Long,
-)
+    val directFile: Boolean = false,
+) {
+    fun resumeWith(server: WatchPosition?): WatchPosition {
+        if (server == null) return position
+        if (directFile) {
+            val episodeOrder = position.episode.compareTo(server.episode)
+            return if (episodeOrder > 0 || (episodeOrder == 0 && position.timeMs / 1000 > server.timeMs / 1000)) {
+                position
+            } else server
+        }
+        return if (server == serverAtSave ||
+            (server.episode == position.episode && kotlin.math.abs(server.timeMs - position.timeMs) < 30_000L)
+        ) position else server
+    }
+}
 
 private fun WatchPosition.toJson() = JSONObject().put("season", episode.season).put("episode", episode.episode)
     .put("timeMs", timeMs)
@@ -85,6 +99,7 @@ private class NamaSession(context: Context) {
                 EpisodeNumber(item.optInt("furthestSeason"), item.optInt("furthestEpisode")),
                 item.optJSONObject("serverAtSave")?.toPosition(),
                 item.optLong("watchedAt"),
+                item.optBoolean("directFile"),
             )
         }.toMap()
     }.getOrDefault(emptyMap())
@@ -97,7 +112,8 @@ private class NamaSession(context: Context) {
         progress.forEach { (id, value) ->
             saved.put(id.toString(), JSONObject().put("position", value.position.toJson())
                 .put("furthestSeason", value.furthest.season).put("furthestEpisode", value.furthest.episode)
-                .put("serverAtSave", value.serverAtSave?.toJson()).put("watchedAt", value.watchedAt))
+                .put("serverAtSave", value.serverAtSave?.toJson()).put("watchedAt", value.watchedAt)
+                .put("directFile", value.directFile))
         }
         prefs.edit().putString("progress", saved.toString())
             .putStringSet("hiddenHeroTitles", hiddenHeroTitles.map(Int::toString).toSet()).apply()
@@ -467,10 +483,7 @@ internal class MediaStore(context: Context) {
 
     fun lastPlayed(id: Int): WatchPosition? {
         val server = serverPosition(id)
-        val saved = localProgress[id] ?: return server
-        return if (server == null || server == saved.serverAtSave ||
-            (server.episode == saved.position.episode && kotlin.math.abs(server.timeMs - saved.position.timeMs) < 30_000L)
-        ) saved.position else server
+        return localProgress[id]?.resumeWith(server) ?: server
     }
 
     private fun watchedThrough(id: Int): EpisodeNumber? =
@@ -558,7 +571,7 @@ internal class MediaStore(context: Context) {
         timeMs: Long,
         durationMs: Long,
         revision: Int,
-        report: Boolean,
+        directFile: Boolean,
     ) {
         val userId = account?.userId ?: 0
         val current = sessionLock.withLock {
@@ -566,22 +579,16 @@ internal class MediaStore(context: Context) {
             val sessionToken = token ?: return
             val position = WatchPosition(episode.key, timeMs)
             val furthest = watchedThrough(titleId)?.let { maxOf(it, episode.key) } ?: episode.key
-            localProgress = localProgress + (titleId to LocalProgress(position, furthest, serverPosition(titleId), System.currentTimeMillis()))
+            val checkpoint = LocalProgress(position, furthest, serverPosition(titleId), System.currentTimeMillis(), directFile)
+            localProgress = localProgress + (titleId to checkpoint)
             hiddenHeroTitles = hiddenHeroTitles - titleId
             saveLocalProgress()
             sessionToken
         }
-        if (report && userId > 0 && episode.fileId > 0 && episode.progressToken.isNotBlank()) {
-            progressLock.withLock {
-                if (current != token || revision != accountRevision) return
-                tryNama {
-                    api.call("observer", current, mapOf(
-                        "post_id" to titleId.toString(), "file_id" to episode.fileId.toString(),
-                        "user_id" to userId.toString(), "time" to (timeMs / 1000).toString(),
-                        "duration" to (durationMs / 1000).toString(), "token" to episode.progressToken,
-                    ))
-                }
-            }
+        val form = episode.observerForm(titleId, userId, timeMs, durationMs) ?: return
+        progressLock.withLock {
+            if (current != token || revision != accountRevision) return
+            tryNama { api.call("observer", current, form) }
         }
     }
 

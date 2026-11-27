@@ -25,8 +25,8 @@ android {
         // The optional FFmpeg decoder is compiled against Android API 26.
         minSdk = if (bundledHevc) 26 else 24
         targetSdk = 35
-        versionCode = 28
-        versionName = "1.1.18"
+        versionCode = 29
+        versionName = "1.1.19"
         buildConfigField("boolean", "BUNDLED_HEVC", bundledHevc.toString())
         buildConfigField("String", "THIRTY_NAMA_API", localString("thirtyNama.api", "https://world.hana-api.com/api/v2"))
         buildConfigField("String", "THIRTY_NAMA_CLIENT", localString("thirtyNama.clientKey"))

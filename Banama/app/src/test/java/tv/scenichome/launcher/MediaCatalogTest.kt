@@ -133,12 +133,12 @@ class MediaCatalogTest {
 
     @Test
     fun includesDownloadOnlyEpisodesEvenWhenOtherEpisodesHaveHls() {
-        val first = MediaEpisode(28, 2, 1, "", "https://media.example/stream.m3u8", emptyList())
+        val first = MediaEpisode(28, 2, 1, "", "https://media.example/stream.m3u8", emptyList(), "episode-token")
         val catalog = PlaybackCatalog(listOf(first), 28, 1000L)
         val releases = JSONObject("""
             {"download":{"s2":[{"link":[
-                {"episode":"Episode 1","quality":"2160p","dl":"https://media.example/first.mkv"},
-                {"episode":"S02E02","tags":["4K"],"dl":"https://media.example/second.mkv"},
+                {"id":82,"episode":"Episode 1","quality":"2160p","dl":"https://media.example/first.mkv"},
+                {"id":83,"episode":"S02E02","tags":["4K"],"dl":"https://media.example/second.mkv"},
                 {"episode":"02","resolution":"3840×1600","dl":"https://media.example/second-alt.mkv"},
                 {"episode":"3","quality":"1080p","dl":"https://media.example/third.mkv"}
             ]}]}}
@@ -151,6 +151,43 @@ class MediaCatalogTest {
         assertEquals(listOf(1, 2, 3), merged.episodes.map(MediaEpisode::number))
         assertEquals(null, merged.episodes.last().hls)
         assertEquals(28, merged.resumeFile)
+        assertEquals(mapOf(
+            "post_id" to "22", "file_id" to "28", "user_id" to "4",
+            "time" to "30", "duration" to "2700", "token" to "episode-token",
+        ), merged.episodes[0].observerForm(22, 4, 47_900L, 2_700_500L))
+        assertEquals("30", merged.episodes[0].observerForm(22, 4, 30_000L, 2_700_500L)?.get("time"))
+        assertEquals(null, merged.episodes[0].observerForm(22, 4, 29_999L, 2_700_500L))
+        assertEquals(null, merged.episodes[1].observerForm(22, 4, 47_900L, 2_700_500L))
+    }
+
+    @Test
+    fun directFileResumeUsesTheLaterEpisodeThenTheGreaterSecond() {
+        val episode = EpisodeNumber(2, 4)
+        val position = WatchPosition(episode, 120_900L)
+        val earlier = WatchPosition(episode, 72_000L)
+        val sameSecond = WatchPosition(episode, 120_000L)
+        val later = WatchPosition(episode, 121_000L)
+        val previousEpisode = WatchPosition(EpisodeNumber(2, 3), 1_800_000L)
+        val nextEpisode = WatchPosition(EpisodeNumber(2, 5), 10_000L)
+        val saved = LocalProgress(position, episode, nextEpisode, 1L, directFile = true)
+        assertEquals(position, saved.resumeWith(null))
+        assertEquals(position, saved.resumeWith(previousEpisode))
+        assertEquals(nextEpisode, saved.resumeWith(nextEpisode))
+        assertEquals(position, saved.resumeWith(earlier))
+        assertEquals(sameSecond, saved.resumeWith(sameSecond))
+        assertEquals(later, saved.resumeWith(later))
+    }
+
+    @Test
+    fun hlsAndOlderBookmarksKeepTheirServerReconciliation() {
+        val episode = EpisodeNumber(2, 4)
+        val position = WatchPosition(episode, 72_000L)
+        val serverAtSave = WatchPosition(EpisodeNumber(2, 5), 180_000L)
+        val saved = LocalProgress(position, episode, serverAtSave, 1L)
+        assertEquals(position, saved.resumeWith(serverAtSave))
+        assertEquals(position, saved.resumeWith(WatchPosition(episode, 88_000L)))
+        val changed = WatchPosition(episode, 120_000L)
+        assertEquals(changed, saved.resumeWith(changed))
     }
 
     @Test
