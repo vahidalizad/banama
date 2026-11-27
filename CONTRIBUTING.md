@@ -33,5 +33,7 @@ For a fork, clone your fork’s URL. If you already have a fork, use **Sync fork
    ```
 
 2. On GitHub, open **Pull requests → New pull request**. Set the base to `main` in `vahidalizad/banama` and compare against your branch. If you pushed to a fork, choose **compare across forks** to select it.
-3. Give the pull request a descriptive title. Explain what changed, why, and how you tested it. Include reproduction steps for a bug or a screenshot for a visible change when it helps. Click **Create pull request**.
+3. Write a short title that describes the feature or fix, such as “Resume direct-file playback at the saved position.” Use the template to summarize the changes and verification. Include reproduction steps or a screenshot when helpful. Click **Create pull request**.
 4. Request a review. Push any follow-up commits to the same branch and GitHub will update the pull request.
+
+Each app's release workflow builds its changelog from merged PR titles and direct commit subjects since that app's previous release.

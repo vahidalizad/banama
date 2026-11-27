@@ -7,6 +7,7 @@ on:
       - 'Banama/**'
       - '*'
       - '.github/workflows/release-banama.yml'
+      - '.github/release-notes.sh'
 
 permissions:
   contents: write
@@ -18,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Build Android toolchain
         run: docker buildx build --platform linux/amd64 --load -t tv-android-dev .
@@ -52,12 +54,17 @@ jobs:
           tag="banama-$GITHUB_SHA"
           apk=Banama/artifacts/Banama.apk
           asset="$apk#Banama $version (build $code)"
-          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
-            if [[ "$draft" == true ]]; then
+          notes=$(bash .github/release-notes.sh banama "$GITHUB_SHA")
+          if release=$(gh release view "$tag" --json isDraft,body 2>/dev/null); then
+            if [[ $(jq -r .isDraft <<< "$release") == true ]]; then
+              body=$(jq -r '.body // empty' <<< "$release")
+              if [[ -n "$body" && "$body" != "$notes" && "$body" != "Built from $GITHUB_SHA." ]]; then
+                notes="$body"$'\n\n'"$notes"
+              fi
               gh release upload "$tag" "$asset" --clobber
-              gh release edit "$tag" --draft=false
+              gh release edit "$tag" --draft=false --notes "$notes"
             fi
           else
             gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
-              --title "Banama $version (${GITHUB_SHA::7})" --notes "Built from $GITHUB_SHA."
+              --title "Banama $version (${GITHUB_SHA::7})" --notes "$notes"
           fi
