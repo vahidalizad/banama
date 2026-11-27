@@ -59,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
@@ -118,7 +119,7 @@ internal fun MediaPlayerScreen(
     var primaryCues by remember { mutableStateOf<List<Cue>>(emptyList()) }
     var secondaryCues by remember { mutableStateOf<List<Cue>>(emptyList()) }
     val captionSelector = remember { CaptionTrackSelector(activity) }
-    val persianTypeface = remember { activity.resources.getFont(R.font.shabnam_regular) }
+    val persianTypeface = remember { ResourcesCompat.getFont(activity, R.font.shabnam_regular) ?: Typeface.DEFAULT }
     val renderers = remember {
         CaptionRenderers(activity, object : TextOutput {
             override fun onCues(cueGroup: CueGroup) { secondaryCues = cueGroup.cues }

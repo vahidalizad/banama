@@ -12,7 +12,8 @@ import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.text.Normalizer
-import java.time.Year
+import java.util.Calendar
+import java.util.GregorianCalendar
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
@@ -57,6 +58,8 @@ internal data class MediaRating(val source: RatingSource, val score: String, val
 internal data class TitlePage(val titles: List<MediaTitle>, val pages: Int)
 internal data class BrowseOption(val label: String, val value: String)
 internal const val FIRST_RELEASE_YEAR = 1888
+internal fun currentReleaseYear() = GregorianCalendar().get(Calendar.YEAR)
+
 internal enum class SearchOrder(val label: String, val parameter: String) {
     DEFAULT("Default order", "update"),
     RELEASE("Newest releases", "year"),
@@ -65,7 +68,7 @@ internal enum class SearchOrder(val label: String, val parameter: String) {
     fun sort(titles: List<MediaTitle>) = when (this) {
         DEFAULT -> titles
         RELEASE -> {
-            val range = FIRST_RELEASE_YEAR..Year.now().value
+            val range = FIRST_RELEASE_YEAR..currentReleaseYear()
             titles.sortedByDescending { it.year.takeIf(range::contains) ?: 0 }
         }
         RANK -> titles.sortedByDescending {
@@ -191,7 +194,7 @@ internal fun browseParameters(
     if (years.isNotEmpty() || order == SearchOrder.RELEASE) {
         // 30nama requires both bounds and otherwise puts invalid years first.
         put("min_year", (years.minOrNull() ?: FIRST_RELEASE_YEAR).toString())
-        put("max_year", (years.maxOrNull() ?: Year.now().value).toString())
+        put("max_year", (years.maxOrNull() ?: currentReleaseYear()).toString())
     }
 }.toString()
 
